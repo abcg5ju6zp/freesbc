@@ -31,6 +31,7 @@ type Shield struct {
 	limiter    *rateLimiter             // per-source limit (rate_limit / carrier_rate_limit)
 	bans       *banList[netip.Addr]     // source IPs (connection-oriented verdicts)
 	socketBans *banList[netip.AddrPort] // UDP source sockets (see CheckFrom)
+	offenders  *offenderTable           // per-source strike counters (Strike)
 
 	// Cumulative drop counters by reason, for the admin API's metrics
 	// snapshot (Stats). Incremented in Check at each of its three drop
@@ -45,6 +46,9 @@ type Shield struct {
 	rlOpts  config.RateLimit
 	carStr  string
 	carOpts config.RateLimit
+	// strike thresholds by reason (strikeLimit), under rlMu.
+	strikeStr  map[string]string
+	strikeOpts map[string]config.StrikeLimit
 
 	stop context.CancelFunc
 	done chan struct{}
@@ -67,6 +71,7 @@ func New(store *config.Store, log *slog.Logger, isCarrier func(netip.Addr) bool)
 		limiter:    newRateLimiter(),
 		bans:       newBanList(),
 		socketBans: newBanTable[netip.AddrPort](),
+		offenders:  newOffenderTable(),
 		stop:       cancel,
 		done:       make(chan struct{}),
 	}
@@ -246,6 +251,7 @@ func (s *Shield) pruneLoop(ctx context.Context) {
 			s.limiter.prune()
 			s.bans.prune()
 			s.socketBans.prune()
+			s.offenders.prune()
 		}
 	}
 }
@@ -256,7 +262,8 @@ type BanInfo struct {
 	Source string
 	// Kind is BanKindIP or BanKindUDPSocket.
 	Kind string
-	// Reason is why the ban was recorded (BanReasonScanner).
+	// Reason is why the ban was recorded (BanReasonScanner,
+	// BanReasonRegister).
 	Reason string
 	// Since is when the ban was first recorded; Until when it lapses.
 	Since, Until time.Time

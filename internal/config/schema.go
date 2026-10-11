@@ -208,6 +208,10 @@ type ShieldConfig struct {
 	// InviteRateLimit is a global limit on new out-of-dialog INVITEs from
 	// admitted peers ("<n>/<s|m|h>", no per_ip). Empty = off. Hot.
 	InviteRateLimit string `yaml:"invite_rate_limit"`
+	// RegisterBan bans a public source whose failed REGISTER credential
+	// attempts pass a threshold ("<n>/<window>", e.g. "10/10m"), or "off".
+	// Default "10/10m". Hot.
+	RegisterBan string `yaml:"register_ban"`
 }
 
 type AdminConfig struct {
@@ -258,6 +262,9 @@ func withDefaults(c *Config) {
 	}
 	if c.Shield.Ban == 0 {
 		c.Shield.Ban = Duration(time.Hour)
+	}
+	if c.Shield.RegisterBan == "" {
+		c.Shield.RegisterBan = DefaultRegisterBan
 	}
 }
 

@@ -21,10 +21,12 @@ const banCap = 65536
 // pruneLoop keeps clearing expired entries regardless.
 const sweepEvery = time.Second
 
-// Ban reasons recorded at insert. A scanner User-Agent verdict is the only
-// path that bans today; rate limiting and enumeration only drop.
+// Ban reasons recorded at insert: a scanner User-Agent verdict, and a
+// source over a strike threshold (Strike). Rate limiting and REGISTER
+// enumeration only drop.
 const (
-	BanReasonScanner = "scanner"
+	BanReasonScanner  = "scanner"
+	BanReasonRegister = "register"
 )
 
 // Ban kinds: which of the two tables an entry lives in.

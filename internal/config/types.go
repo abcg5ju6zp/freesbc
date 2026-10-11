@@ -124,3 +124,44 @@ func ParseRateLimit(s string) (RateLimit, error) {
 	}
 	return rl, nil
 }
+
+// StrikeLimit is the parsed form of a shield strike threshold such as
+// shield.register_ban: a source is banned once it has collected more than N
+// strikes within Window. Off disables it.
+type StrikeLimit struct {
+	N      int
+	Window time.Duration
+	Off    bool
+}
+
+// DefaultRegisterBan is shield.register_ban when the key is unset.
+const DefaultRegisterBan = "10/10m"
+
+// Bounds of a strike threshold: a window longer than a day, or a count
+// beyond maxStrikeN, is a typo rather than a policy.
+const (
+	maxStrikeN      = 100000
+	maxStrikeWindow = 24 * time.Hour
+)
+
+// ParseStrikeLimit parses "<n>/<window>" (window a Go duration such as
+// "10m", at least 1s and at most 24h; n from 1 to 100000) or "off".
+func ParseStrikeLimit(s string) (StrikeLimit, error) {
+	s = strings.TrimSpace(s)
+	if s == "off" {
+		return StrikeLimit{Off: true}, nil
+	}
+	numStr, win, ok := strings.Cut(s, "/")
+	if !ok {
+		return StrikeLimit{}, fmt.Errorf("invalid strike limit %q: want \"<n>/<window>\" or \"off\"", s)
+	}
+	n, err := strconv.Atoi(numStr)
+	if err != nil || n < 1 || n > maxStrikeN {
+		return StrikeLimit{}, fmt.Errorf("invalid strike limit %q: n must be an integer from 1 to %d", s, maxStrikeN)
+	}
+	d, err := time.ParseDuration(win)
+	if err != nil || d < time.Second || d > maxStrikeWindow {
+		return StrikeLimit{}, fmt.Errorf("invalid strike limit %q: window must be a duration from 1s to 24h", s)
+	}
+	return StrikeLimit{N: n, Window: d}, nil
+}

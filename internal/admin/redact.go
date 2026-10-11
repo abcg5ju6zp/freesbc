@@ -28,6 +28,7 @@ func redactConfig(cfg *config.Config) any {
 			"ban":                cfg.Shield.Ban.Std().String(),
 			"max_sessions":       cfg.Shield.MaxSessions,
 			"invite_rate_limit":  cfg.Shield.InviteRateLimit,
+			"register_ban":       cfg.Shield.RegisterBan,
 		},
 	}
 	if cfg.TLS != nil {

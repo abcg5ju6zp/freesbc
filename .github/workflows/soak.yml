@@ -57,6 +57,7 @@ jobs:
           - { pkg: ./internal/media, target: FuzzAuditWebRTCLegPreICE }
           - { pkg: ./internal/media, target: FuzzAuditWebRTCEstablished }
           - { pkg: ./internal/sip, target: FuzzAuditSIPMessageHelpers }
+          - { pkg: ./internal/sip, target: FuzzRegisterScan }
           - { pkg: ./internal/sip/sdp, target: FuzzAuditParseBuild }
           - { pkg: ./internal/sip/sdp, target: FuzzAuditBuildNoSentinelLeak }
           - { pkg: ./internal/sip/sdp, target: FuzzParseCrypto }

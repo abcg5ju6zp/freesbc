@@ -354,6 +354,9 @@ func (c *Config) validateShield(fail failFunc) {
 			fail("shield.invite_rate_limit: per_ip is not allowed, the limit is global (per-source limits are shield.rate_limit)")
 		}
 	}
+	if _, err := ParseStrikeLimit(c.Shield.RegisterBan); err != nil {
+		fail("shield.register_ban: %v", c.envRedact.detail(c.Shield.RegisterBan, err))
+	}
 }
 
 // validateAdmin checks the optional admin section.

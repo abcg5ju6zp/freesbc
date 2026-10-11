@@ -90,6 +90,9 @@ type Deps struct {
 	// Bans returns one page of the live shield bans, the total, and the
 	// cumulative ban additions refused at the table cap.
 	Bans func(limit, offset int) (page []Ban, total int, addsRejected int64)
+	// Offenders returns up to limit sources with shield strikes in an open
+	// window, most strikes first, and the total number of such sources.
+	Offenders func(limit int) (top []Offender, total int)
 	// SwitchNodes reports the passive health of each switch node.
 	SwitchNodes func() []SwitchNode
 	// Carriers reports the resolution state of each configured carrier.
@@ -124,6 +127,9 @@ type ProxyStats struct {
 
 	RegistrationTotal   uint64 `json:"registration_total"`
 	RegistrationFailure uint64 `json:"registration_failure_total"`
+	// RegisterAuthFailures counts failed REGISTER credential attempts
+	// struck against their source (shield.register_ban).
+	RegisterAuthFailures uint64 `json:"register_auth_failures_total"`
 
 	RequestsIn   map[string]uint64 `json:"sip_requests_total"`
 	ResponsesOut map[string]uint64 `json:"sip_responses_total"`
@@ -226,6 +232,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/registrations", s.requireAuth(s.handleRegistrations))
 	mux.HandleFunc("/api/carrier-registrations", s.requireAuth(s.handleCarrierRegistrations))
 	mux.HandleFunc("/api/shield/bans", s.requireAuth(s.handleBans))
+	mux.HandleFunc("/api/shield/offenders", s.requireAuth(s.handleOffenders))
 	mux.HandleFunc("/api/switch-nodes", s.requireAuth(s.handleSwitchNodes))
 	mux.HandleFunc("/api/carriers", s.requireAuth(s.handleCarriers))
 	mux.HandleFunc("/api/drain", s.requireAuth(s.handleDrain))

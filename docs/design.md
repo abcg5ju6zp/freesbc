@@ -154,8 +154,9 @@ Created once, alive for the process lifetime:
 | `edge.cooldownTable` | edge | `edge.New` (`edge.go:216`) | `upstreamCooldown`, the passive switch-node penalty (`cooldown.go`) |
 | `edge.arrivalMarker` | edge | `edge.New` (`edge.go:200`) | per-process 128-bit secret behind the arrival header that marks a read on the trusted private socket (§7.1) |
 | `edge.enumLimiter`, `warnOnce` | edge | `edge.New` (`edge.go:220-221`) | REGISTER enumeration limiter and admission-drop log limiter (`admission.go`) |
+| `edge.regGuard` | edge | `edge.New` | the REGISTER credential guard: challenge nonces and branches relayed per source key, attempts already struck (`regguard.go`, §7.4) |
 | `media.DTLSIdentity` | media | `edge.New` (`edge.go:229-234`) when `edge.listen.ws` or `wss` is set | one self-signed identity per process (`media.ProcessDTLSIdentity`), shared by every WebRTC leg |
-| `shield.Shield` | shield | `edge.Server.Run` (`edge.go:449`) | one instance; bans in process memory only; carrier sources are limited by `shield.carrier_rate_limit` and exempt from the scanner ban |
+| `shield.Shield` | shield | `edge.Server.Run` (`edge.go:449`) | one instance; bans and the strike (offender) table in process memory only; carrier sources are limited by `shield.carrier_rate_limit` and are never banned |
 | `admin.Server` | admin | `app.go:91` | only when an `admin:` section exists at startup |
 
 ### 3.2 Per-unit-of-work objects
@@ -384,6 +385,7 @@ Every top-level section is restart-only except `shield`. The table is
 |---|---|
 | `shield.max_sessions`, `shield.invite_rate_limit`: `beginDialog` reads `store.Current()` once per out-of-dialog INVITE (`invite.go:240`); the effective session limit is `max_sessions` clamped to the boot `rtp` pairs (`sessionLimit`, `invite.go:204`) | |
 | `shield.rate_limit`, `shield.carrier_rate_limit`, `shield.ban`: the shield reads `store.Current()` on every check (`shield.go:123`), re-parsing a rate-limit string only when it changes (`shield.go:228`) | `public` (`ip`, `bind`) |
+| `shield.register_ban`: `Shield.Strike` reads `store.Current()` per strike, re-parsing only when the string changes (`strikeLimit`, `offenders.go`) | |
 | | `private` (`ip`) |
 | | `rtp` (the media pools read the range from `boot`, `mediapool.go:19`) |
 | | `tls` (certificates are loaded at bind: TLS and WSS in `openListener`; the admin in `admin.Server.Run`) |
@@ -745,6 +747,15 @@ Who may push an out-of-dialog INVITE or a REGISTER into the switch is
 decided after parsing, per request type: INVITE admission (§7.5) and the
 REGISTER enumeration limit (§7.4), both in `edge/admission.go`.
 
+One REGISTER check does run in the read filter, after the ban and rate
+checks: a public **UDP** REGISTER carrying credentials is scanned raw
+(`fsip.ScanRegister`, `internal/sip/regscan.go`) and handed to the
+credential guard (`registerReplayRead`, `edge/regguard.go`, §7.4), because a
+credential retry on the branch FreeSBC has just challenged is a
+retransmission to sipgo, which answers it with the cached 401 and never runs
+a handler. If that strike bans the source, the datagram is dropped. Every
+other read pays only a 9-byte prefix compare.
+
 **Arrival marker** (`edge/arrival.go`). sipgo hands a handler only a
 message's *source*, never the local socket it arrived on; only the read
 filter sees the socket, and a filter may replace the bytes. So when the
@@ -1070,6 +1081,39 @@ Per REGISTER:
    the cap evicts the least recently rejected one, so a flood of sources
    never stops tracking. The thresholds are constants, not config. Then
    reject if the transport has no configured public side (488).
+
+   **Credential guard** (`edge/regguard.go`, issue #181). The enumeration
+   limit never sees a registrar that challenges (401) every guess, so failed
+   credential attempts are struck against their source in the shield
+   (`Shield.Strike(src, "register")`, threshold `shield.register_ban`,
+   default `10/10m`, hot). `pumpRegister` calls `registerOutcome` on every
+   final, before relaying it: a **2xx clears** the source's strikes; a
+   **401, 403, 404 or 407** to a REGISTER carrying `Authorization` or
+   `Proxy-Authorization` is a strike, unless the new challenge says
+   `stale=true`; and the nonces of a 401/407 challenge are remembered for
+   the source key, with the challenged Via branch. An attempt is countable
+   only when its nonce is one FreeSBC relayed to that source key within
+   15 min (`regNonceTTL`): a forger never sees the challenge sent to the
+   address it claims, so forged datagrams can neither strike a victim nor
+   fill the ban table. Each attempt (branch and `fsip.DigestAttempt` key)
+   counts once, so a retransmission is not a second strike. A request from
+   the source of a live binding with the same AoR and Call-ID (a refresh),
+   and a carrier source, never count. An exchange the registrar never
+   answered (the synthesised 503/504) never counts: at the edge it is a
+   switch outage, and banning would only prolong it. Over UDP a credential
+   retry that reuses the challenged branch within 40 s (`regReplayWindow`,
+   sipgo's Timer J plus a margin) is absorbed by sipgo's transaction, so the
+   read filter counts it (§7.1). Reliable transports end the server
+   transaction with its final, so a reused branch there reaches this path.
+   Over the threshold `Strike` bans the struck IP for `shield.ban` (reason
+   `register`; WARN `shield banned source for repeated failures` once per
+   window) and every further strike in the window re-bans the address that
+   made it, so an IPv6 attacker rotating inside its /64 (one strike key) is
+   banned address by address. The guard keeps at most 16384 source keys
+   (`regGuardSources`, LRU, 4 nonce and 8 branch hashes and 16 struck
+   attempts each); the shield's offender table at most 16384 (source key,
+   reason) entries (`offenderCap`, LRU, pruned on the shield tick). Nonces
+   are stored as FNV-1a hashes and never logged.
 2. `aorOf(req)` derives the AoR from the **To** header (RFC 3261 §10.2) and
    rejects with **400** when the user or host is empty, the user part
    contains any of `` @ \t\r\n<>;,"``, the user exceeds 128 characters, the
@@ -3166,7 +3210,9 @@ If the forward fails, FreeSBC makes one stateless re-send attempt and answers
 | `media.latch.mu` (×4 per session) | mode, expected, signalled, sigSource, dst, remote, rank, learnedAt |
 | `media.SRTPContext.mu` | pion's lockless `*srtp.Context` and the output slab |
 | `media.WebRTCLeg.mu` | agent, mux, demux, SRTP contexts, peer-cert getter, err, state |
-| `shield.banList.mu` ×2, `shield.rateLimiter.mu`, `Shield.rlMu` | the IP and UDP-socket ban tables, the limiter's buckets and global bucket, and the cached rate-limit parses |
+| `shield.banList.mu` ×2, `shield.rateLimiter.mu`, `Shield.rlMu` | the IP and UDP-socket ban tables, the limiter's buckets and global bucket, and the cached rate-limit and strike-threshold parses |
+| `shield.offenderTable.mu` | the per-source strike counters (`offenders.go`); released before a ban is recorded |
+| `edge.regGuard.mu` | the REGISTER credential guard's per-source records (`regguard.go`); a leaf lock, taken from the read filter and `pumpRegister` |
 | `admin.authLimiter.mu` | the per-source auth-failure window, including reservations |
 | `admin.verifiedCreds.mu` | the verified-credential digests |
 | `config.Store.mu` | the subscriber slice only |
@@ -3414,6 +3460,7 @@ permanent series per call."
 | `freesbc_edge_stream_connections` | Gauge | `transport` ∈ {`tcp`, `tls`, `ws`, `wss`} | open public stream connections, moved by `streamConn` open and close (§7.1a); every transport is always exported |
 | `freesbc_edge_stream_refused_total` | Counter | `reason` ∈ {`global_cap`, `ip_cap`, `banned`, `rate`} | connections refused at accept (§7.1a); every reason is always exported |
 | `freesbc_edge_stream_closed_total` | Counter | `reason` ∈ {`idle`, `slow`, `oversize`, `malformed`, `handshake`, `rate`} | connections closed by stream policy (§7.1a); every reason is always exported |
+| `freesbc_edge_register_auth_failures_total` | Counter | — | edge `registerStrike` (`regguard.go`): one per failed REGISTER credential attempt struck against its source (§7.4), replays counted in the read filter included. No `source` label: the sources are in `GET /api/shield/offenders` |
 | `freesbc_edge_admission_drops_total` | Counter | `reason` ∈ {`invite_not_admitted`, `register_enumeration`, `subscribe_not_admitted`, `message_not_admitted`} | edge `dropSilently` (`admission.go:141`): a public out-of-dialog INVITE refused by admission (§7.5), a REGISTER from a source over the enumeration limit (§7.4), an out-of-dialog SUBSCRIBE or MESSAGE from a source without a live registration (§7.8a); every reason is always exported |
 | `freesbc_edge_calls_ended_total` | Counter | `reason` ∈ {`bye_caller`, `bye_callee`, `bye_unanswered`, `rtp_silence`, `dtls_failure`, `reinvite_refused`, `answer_timeout`, `answer_unusable`, `media_fault`, `shutdown`, `ack_timeout`} | edge `dialog.end` (`dialog.go:1144`), one per confirmed call that ended, by the reason of the `end` that won (§7.7); every reason is always exported |
 | `freesbc_edge_ack_missed_total` | Counter | `plane` ∈ {`public`, `private`}: the side that failed to ACK a 2xx | edge `noteAckMiss` (`ack.go`), once per missed ACK (§7.7); both planes are always exported |
@@ -3436,7 +3483,7 @@ There is no config-reload metric and no carrier DNS metric.
 | Level | Examples |
 |---|---|
 | `Error` | `"proxy handler panic"` (+ stack); `"registration binding rejected"`; `"rejecting call: media ports exhausted"`; media relay panic (`"media relay panic; killing session"`); `"admin handler panic"` (+ stack); `"config watcher error"`, `"config reload failed, keeping previous config"`; `"config watcher exited"`, `"edge proxy exited"`, `"admin server exited"` |
-| `Warn` | `"config reload changes restart-only settings; …"`; `"config written via admin API"`; `shield banned scanner`; `"public request dropped by admission; …"` (the first drop per source IP and reason, remembered in a FIFO set capped at 4096, `maxWarnedSources`, `admission.go:116`); `"REGISTER enumeration limit reached; …"`; `"rejecting call: too many unanswered calls from one source"`; `"upstream INVITE unanswered; entering cooldown"` / `"upstream REGISTER unanswered; entering cooldown"`; `"forward INVITE upstream"` / `"forward INVITE to client"` / `"forward INVITE to carrier"` / `"forward carrier REGISTER"` failures; `"carrier has no resolved address"`; `"carrier DNS lookup failed; keeping the last good addresses"`; `"carrier request names an unknown or expired registration token; …"`; `"2xx ACK never arrived; …"` (the first miss per plane, then at most one per minute, with `suppressed`); `"webrtc leg failed"`; the fingerprint-mismatch teardown; `"rejecting call to WebSocket client: …"` (a WebSocket client with no ws/wss listener cannot be offered DTLS-SRTP) |
+| `Warn` | `"config reload changes restart-only settings; …"`; `"config written via admin API"`; `shield banned scanner`; `shield banned source for repeated failures` (once per source key and window, §14.1); `"public request dropped by admission; …"` (the first drop per source IP and reason, remembered in a FIFO set capped at 4096, `maxWarnedSources`, `admission.go:116`); `"REGISTER enumeration limit reached; …"`; `"rejecting call: too many unanswered calls from one source"`; `"upstream INVITE unanswered; entering cooldown"` / `"upstream REGISTER unanswered; entering cooldown"`; `"forward INVITE upstream"` / `"forward INVITE to client"` / `"forward INVITE to carrier"` / `"forward carrier REGISTER"` failures; `"carrier has no resolved address"`; `"carrier DNS lookup failed; keeping the last good addresses"`; `"carrier request names an unknown or expired registration token; …"`; `"2xx ACK never arrived; …"` (the first miss per plane, then at most one per minute, with `suppressed`); `"webrtc leg failed"`; the fingerprint-mismatch teardown; `"rejecting call to WebSocket client: …"` (a WebSocket client with no ws/wss listener cannot be offered DTLS-SRTP) |
 | `Info` | `"edge proxy listening"`, `"media planes ready"`, `"freesbc started"`, `"shutting down"`, `"admin server listening"`, `"config reloaded"`; `"proxying INVITE upstream"` / `"proxying INVITE to client"` / `"proxying INVITE to carrier"`; `"carrier registration"` with the granted expiry; `"carrier resolved"`; `"registration accepted"` / `"removed"` / `"rejected"`; `"webrtc media established"`; `"rejecting call: media not negotiable"`; `"ending the call; sending BYE to both ends"` with the `reason`; `"call ended"` with `reason`, `terminated_by`, `duration`, `webrtc`, `carrier` and media stats |
 | `Debug` | dialog ACK/BYE bookkeeping; `"2xx ACK never arrived"` for every miss; shield rate-limit drops and scanner-datagram drops; edge `"public request dropped by admission"` after the first per source; `"in-dialog request without a dialog record; hashing upstream"` and its carrier variant; `"pruned expired registration bindings"` / `"pruned expired carrier registrations"`; `"carrier DNS lookup still failing"`; `"forward carrier OPTIONS"`; dropped unroutable responses |
 
@@ -3469,7 +3516,8 @@ Host and Origin checks (§14, Admin) before any auth work, on every route but
 | `/api/tls` | GET (else 405 + `Allow: GET`) | Basic | `{"loaded": false}` when no listener loaded the top-level `tls` pair; else `{"loaded": true, "subject" (CN), "sans", "issuer", "not_before", "not_after" (RFC 3339 UTC), "key_type", "key_size", "key_curve", "fingerprint_sha256", "cert_file", "key_file", "loaded_at", "listeners" (`tls`/`wss` from the edge, `admin`), "days_to_expiry" (whole days, truncated toward zero, negative once expired, 0 within a day), "expired", "expiring_soon" (under 30 days, not expired), "disk_differs", "disk_error"}` (`handleTLS`, `tlscert.go`). The leaf is `Certificate[0]`, kept at load by `edge.noteTLSLeaf` (`Server.TLSCert`, wired as `Deps.TLSCert`) and by `Run` for remote admin HTTPS; the edge's wins, as both read the same pair. `disk_differs` re-reads the first certificate of the cert file on each request only (never on a timer). Never the key or PEM |
 | `/api/registrations` | GET (else 405 + `Allow: GET`) | Basic | `?user=&limit=&offset=` (`handleRegistrations`, `state.go:133`): `{"items":[{"aor","user","transport","source" (IP:port),"expires_in" (seconds)}],"total","limit","offset"}`. `user` is a case-insensitive substring of the user part (at most 256 bytes); `limit` defaults to 100 and is clamped to 1000; a `limit` below 1 or non-numeric, a negative or non-numeric `offset` or an over-long `user` is 400. `total` counts the matches. Sorted by AoR, source, transport. Read from `Location.Registrations` (`location.go:404`) under its read lock. No Contact, token or Call-ID |
 | `/api/carrier-registrations` | GET (else 405) | Basic | array of `{"carrier","user","token","node","expires_in"}`; always an array. The switch's live registrations at carriers (`carrierRegTable.snapshot`, `carrierreg.go:312`); `token` is the opaque `fsbc` value in the carrier Contact, `node` the registering switch node |
-| `/api/shield/bans` | GET (else 405) | Basic | `?limit=&offset=` (`handleBans`, `state.go:184`): `{"items":[{"source","kind" ("ip" or "udp_socket"),"reason","since" (RFC 3339),"remaining" (seconds)}],"total","limit","offset","ban_adds_rejected"}`. Both ban tables merged, newest first (`Shield.Bans`, `shield.go:273`); limit and offset as for registrations. `reason` is `scanner`, the only path that bans (rate limiting and enumeration only drop). `ban_adds_rejected` is the cumulative additions refused at the 65536 cap |
+| `/api/shield/bans` | GET (else 405) | Basic | `?limit=&offset=` (`handleBans`, `state.go:184`): `{"items":[{"source","kind" ("ip" or "udp_socket"),"reason","since" (RFC 3339),"remaining" (seconds)}],"total","limit","offset","ban_adds_rejected"}`. Both ban tables merged, newest first (`Shield.Bans`, `shield.go:273`); limit and offset as for registrations. `reason` is `scanner` or `register` (rate limiting and enumeration only drop). `ban_adds_rejected` is the cumulative additions refused at the 65536 cap |
+| `/api/shield/offenders` | GET (else 405) | Basic | `?limit=` (`handleOffenders`, `state.go`): `{"items":[{"source" (IPv4 address or IPv6 /64),"reason" ("register"),"strikes","since" (RFC 3339, the window opened),"remaining" (seconds of the window)}],"total","limit"}`, most strikes first (`Shield.Offenders`, `offenders.go`); limit default 100, at most 1000 |
 | `/api/switch-nodes` | GET (else 405) | Basic | array of `{"address","state" ("healthy" or "cooling_down"),"cooldown_remaining" (seconds),"last_failure" (RFC 3339 or null)}`; always an array, one per `edge.switch` entry, sorted by address (`cooldownTable.snapshot`, `cooldown.go:76`) |
 | `/api/carriers` | GET (else 405) | Basic | array of `{"name","host","transport","mode" ("literal", "srv", "a" or "" until resolved),"addresses":[{"address","in_use"}],"resolved_at","expires_at" (RFC 3339 or null),"cache_age_seconds" (or null),"failing","last_error"}`; always an array, sorted by name (`carrierDirectory.snapshotInfo`, `carrierdns.go:474`). `in_use` marks the first address, the one the edge sends to. While `failing`, `expires_at` is the next retry and the addresses are the last good set |
 | `/api/drain` | GET, POST, DELETE (else 405 + `Allow: GET, POST, DELETE`) | Basic | `{"draining": bool, "since": RFC 3339 or null, "active_calls": int}` (`handleDrain`, `api.go:96`). POST enters drain mode, DELETE leaves it; both are idempotent (a repeated POST keeps the original `since`) and answer with the same body as GET. POST and DELETE need the Origin check below. 404 when `Deps.DrainState` or `Deps.SetDraining` is nil. Each actual change is logged at Info with the remote address and `active_calls`; each actual change is also recorded as `drain_on` / `drain_off` (§13.5) |
@@ -3675,7 +3723,8 @@ opens an in-page confirmation (no `window.confirm`) before it sends POST or
 DELETE to `/api/drain`. The **Overview** also lists the `listeners` of
 `/api/status`. A **State** tab lists the five live-state tables
 (`/api/registrations`, `/api/carrier-registrations`, `/api/shield/bans`,
-`/api/switch-nodes`, `/api/carriers`), each with an empty state. It is fetched
+`/api/switch-nodes`, `/api/carriers`), each with an empty state
+(`/api/shield/offenders` is API-only). It is fetched
 when the tab opens and on Reload, not polled. Registrations have a user search
 (300 ms debounce, back to page 1) and Previous/Next paging of 50; bans page the
 same way and show the total and `ban_adds_rejected`. All are read-only. Design
@@ -3815,8 +3864,22 @@ seen as `192.0.2.1` (P2-SHD-009). A ban also closes the banned source's
 tcp/tls/ws/wss connection: `guard` closes the one the banning request came on,
 and the read filter closes any other on its next read (`closeStream`,
 `edge.go:925`, P2-SHD-006). An idle connection opened before the ban stays open
-until it next sends. There is no failure-count auto-ban, no kernel enforcement
-and no API that lifts a ban.
+until it next sends. There is no kernel enforcement and no API that lifts a
+ban.
+
+**Strike bans** (`Shield.Strike`, `offenders.go`). A plane may report a
+source's failures as strikes; over the reason's threshold the source IP is
+banned for `shield.ban` with the reason as the ban reason. The only reason
+today is `register` (`shield.register_ban`, default `10/10m`, hot): a failed
+REGISTER credential attempt (§7.4). Strikes are counted per source key (IPv4
+address, IPv6 /64) in a fixed window from the first strike, in an LRU of at
+most 16384 entries (`offenderCap`), so a flood of sources only forgets the
+oldest; a carrier source is never struck; a success clears the count
+(`ClearStrikes`). Strikes on a forgeable transport are the caller's to make
+safe: the REGISTER guard counts only an attempt whose nonce FreeSBC relayed
+to that source in a challenge, so a forged UDP datagram can neither ban a
+victim nor push forged addresses into the ban table (#17). `GET
+/api/shield/offenders` lists the sources with strikes in an open window.
 
 **Every denial is a silent drop.** A scanner never gets confirmation that the
 SBC exists.
@@ -4043,10 +4106,13 @@ code constant.
 | `ackMissWarnEvery` | 1 min per plane (`ack.go:22`) | spacing of the missed-ACK WARN lines |
 | `ackTimeout` (`ackBudget`) | 32 s (`edge.go`) | also the wait for a 2xx ACK before `ack_timeout` ends the call (`ack.go`) |
 | `banCapQuiet` | 60 s (`app/health.go:22`) | how long `BanAddsRejected` must stand still before `shield_ban_cap` clears |
-| `shield.ban` | 1 h (config); a UDP socket ban at most 1 min (`socketBanMax`) | a scanner ban |
+| `shield.ban` | 1 h (config); a UDP socket ban at most 1 min (`socketBanMax`) | a scanner ban, and a `register_ban` ban |
 | shield prune tick | 1 min (`shield.go:239`) | expired bans and idle rate-limit buckets |
 | binding / carrier-registration / subscription prune tick | 30 s (`edge.go:534`, `edge.go:559`) | expired bindings (memory only; lookups already hide them) and expired subscription records |
 | `enumWindow` | 10 min, from a source's first counted rejection | the REGISTER enumeration limit (§7.4) |
+| `shield.register_ban` window | 10 min (config), from a source's first strike | the REGISTER credential guard (§7.4) |
+| `regNonceTTL` | 15 min (`regguard.go`) | how long a challenge nonce relayed to a source keeps its attempts countable |
+| `regReplayWindow` | 40 s (`regguard.go`) | how long after a challenge a UDP credential retry on the challenged branch counts as a replay sipgo absorbs |
 | `media.LearnDelay` | 3 s (`session.go:69`) | a loose latch keeps sending to a plausible SDP address before switching to another learned port (§8.4) |
 | WebRTC establishment | 30 s (`WebRTCLeg.Start`'s default, `webrtcleg.go:386`; the edge passes none) | ICE **and** DTLS together, including the fingerprint check inside the handshake |
 | config reload debounce | 200 ms (`reload.go:14`) | fsnotify coalescing |

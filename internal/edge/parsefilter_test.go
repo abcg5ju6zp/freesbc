@@ -439,6 +439,8 @@ func FuzzReadFilter(f *testing.F) {
 	f.Add([]byte("\r\n\r\n"), []byte{10, 1, 2, 3}, uint16(0), uint8(3), false)
 	f.Add([]byte{}, []byte{0x20, 0x01, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, uint16(1), uint8(9), true)
 	f.Add(make([]byte, 30000), []byte{1, 2}, uint16(65535), uint8(1), false)
+	f.Add([]byte("REGISTER sip:x SIP/2.0\r\nVia: SIP/2.0/UDP 198.51.100.1;branch=z9hG4bK-1\r\nTo: <sip:a@x>\r\n"+
+		"Call-ID: c\r\nAuthorization: Digest nonce=\"n\", response=\"r\"\r\n\r\n"), []byte{198, 51, 100, 1}, uint16(5060), uint8(0), false)
 	nets := []string{"udp", "tcp", "tls", "ws", "wss", "UDP", "", "sctp", "WS", "x"}
 	f.Fuzz(func(t *testing.T, data, ip []byte, port uint16, tr uint8, private bool) {
 		var addr netip.Addr

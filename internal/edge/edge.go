@@ -141,6 +141,9 @@ type Server struct {
 	// reason; enumLimit is the REGISTER enumeration limit (admission.go).
 	dropWarned *warnOnce
 	enumLimit  *enumLimiter
+	// regGuard remembers the challenges relayed to public REGISTER
+	// sources, so failed credential attempts can be struck (regguard.go).
+	regGuard *regGuard
 
 	// streams counts open tcp/tls/ws/wss connections for the caps; streamLim
 	// is the bounds they live under (stream.go). Tests shorten streamLim
@@ -244,6 +247,7 @@ func New(store *config.Store, log *slog.Logger, opts ...Option) (*Server, error)
 		early:            map[netip.Addr]int{},
 		dropWarned:       newWarnOnce(maxWarnedSources),
 		enumLimit:        newEnumLimiter(),
+		regGuard:         newRegGuard(),
 		inviteLimiter:    shield.NewLimiter(),
 		webrtcEnabled:    cfg.WebRTC(),
 		streams:          newStreamTable(),
@@ -384,6 +388,16 @@ func (s *Server) Bans(limit, offset int) (page []shield.BanInfo, total int, adds
 	}
 	page, total = sh.Bans(limit, offset)
 	return page, total, sh.Stats().BanAddsRejected
+}
+
+// Offenders is the shield's sources with strikes in an open window, most
+// strikes first, and their total; empty before Run has created the shield.
+func (s *Server) Offenders(limit int) (top []shield.OffenderInfo, total int) {
+	sh := s.currentShield()
+	if sh == nil {
+		return []shield.OffenderInfo{}, 0
+	}
+	return sh.Offenders(limit)
 }
 
 // Listeners is the listener set Run binds, as transport://host:port, from
@@ -665,6 +679,7 @@ func (s *Server) Run(ctx context.Context) error {
 		"carrier_sources", s.carriers.snapshot().sourcesString(),
 		"max_sessions", s.sessionLimit(s.store.Current()),
 		"invite_rate_limit", s.store.Current().Shield.InviteRateLimit,
+		"register_ban", s.store.Current().Shield.RegisterBan,
 		"webrtc", s.webrtcEnabled)
 
 	close(s.ready)
@@ -964,6 +979,12 @@ func (s *Server) readFilter() sip.TransportReadFilter {
 		}
 		if a := trusted(info); a != arrPublic {
 			return s.marker.stamp(a, out), nil
+		}
+		// A REGISTER whose credential retry reuses a challenged branch is
+		// answered by sipgo from its transaction, never by a handler, so
+		// it is counted here (regguard.go).
+		if s.registerReplayRead(info, out) {
+			return nil, nil
 		}
 		return out, nil
 	}

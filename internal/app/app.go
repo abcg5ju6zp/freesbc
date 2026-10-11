@@ -181,6 +181,15 @@ func adminDeps(edgeSrv *edge.Server, version string, running *config.Config, sto
 			}
 			return out, total, rejected
 		},
+		Offenders: func(limit int) ([]admin.Offender, int) {
+			top, total := edgeSrv.Offenders(limit)
+			out := make([]admin.Offender, 0, len(top))
+			for _, o := range top {
+				out = append(out, admin.Offender{Source: o.Source, Reason: o.Reason,
+					Strikes: o.Strikes, Since: o.Since, Until: o.Until})
+			}
+			return out, total
+		},
 		SwitchNodes: func() []admin.SwitchNode {
 			out := []admin.SwitchNode{}
 			for _, n := range edgeSrv.SwitchNodes() {
@@ -214,6 +223,7 @@ func adminDeps(edgeSrv *edge.Server, version string, running *config.Config, sto
 				Draining:               s.Draining,
 				RegistrationTotal:      s.RegistrationTotal,
 				RegistrationFailure:    s.RegistrationFailure,
+				RegisterAuthFailures:   s.RegisterAuthFailures,
 				RequestsIn:             s.RequestsIn,
 				ResponsesOut:           s.ResponsesOut,
 				RTPPacketsRx:           s.RTPPacketsRx,

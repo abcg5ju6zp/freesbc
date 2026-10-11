@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/netip"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/emiago/sipgo/sip"
@@ -86,6 +85,7 @@ func (s *Server) onRegister(req *sip.Request, tx sip.ServerTransaction, arrived 
 		requested: expires, unregister: unregister,
 		clientContact: clientContact, hasContact: hasContact,
 		wildcard: wildcard,
+		head:     registerHead(req, aor),
 	}
 
 	// ONE budget for the whole attempt series, not one per node (D2): on
@@ -221,6 +221,11 @@ func (s *Server) pumpRegister(ctx context.Context, req *sip.Request, tx sip.Serv
 			// must find the limit already applied.
 			limitHit := final && countsAsEnumeration(res.StatusCode) &&
 				s.enumLimit.rejected(in.source.Addr(), in.aor)
+			// The credential guard (regguard.go) likewise judges the
+			// outcome before the client sees it.
+			if final {
+				s.registerOutcome(in, res)
+			}
 			err := s.relayResponse(req, tx, res, func(relayed *sip.Response) error {
 				if final && res.StatusCode/100 == 2 {
 					granted := s.recordBinding(res, in)
@@ -293,6 +298,9 @@ type bindingInput struct {
 	hasContact    bool
 	// wildcard is a "Contact: *" un-REGISTER: every binding of the AoR.
 	wildcard bool
+	// head is the request as the credential guard sees it: branch, AoR,
+	// Call-ID and the credential attempt, if any (regguard.go).
+	head fsip.RegisterHead
 }
 
 // recordBinding installs or removes the binding after a successful
@@ -393,17 +401,13 @@ func aorOf(req *sip.Request) (aor, user string, ok bool) {
 	if to == nil || to.Address.User == "" || to.Address.Host == "" {
 		return "", "", false
 	}
-	u := to.Address.User
-	// A user part is copied into a Request-URI and a log line; anything
-	// with structural characters in it is malformed, not merely unusual.
-	if strings.ContainsAny(u, "@ \t\r\n<>;,\"") || len(u) > 128 {
+	// The same normalization the read filter's raw scan applies
+	// (fsip.ScanRegister), so the two name an AoR identically.
+	aor, ok = fsip.NormalizeAOR(to.Address.User, to.Address.Host)
+	if !ok {
 		return "", "", false
 	}
-	host := to.Address.Host
-	if strings.ContainsAny(host, " \t\r\n<>;,\"") || len(host) > 255 {
-		return "", "", false
-	}
-	return strings.ToLower(u + "@" + host), u, true
+	return aor, to.Address.User, true
 }
 
 // hasWildcardContact reports whether any Contact of req is "*".

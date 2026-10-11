@@ -117,6 +117,9 @@ type Server struct {
 	// tests set it.
 	ackWait atomic.Int64
 
+	// ackMiss keeps the recent 2xx ACK misses (ack.go).
+	ackMiss ackMissTracker
+
 	// ready is closed once every listener is bound and served, and every
 	// UDP listener is in sipgo's connection pool (see awaitUDPServing).
 	// Nothing in production waits on it; it is the happens-before edge the

@@ -55,6 +55,10 @@ type Metrics struct {
 	// (dialog.go), one counter per (fixed) reason.
 	callsEnded [numEndReasons]atomic.Uint64
 
+	// ackMissed counts 2xx ACKs that never came, by the plane that owed
+	// them (ack.go), indexed by plane.
+	ackMissed [2]atomic.Uint64
+
 	// inviteRejects counts final responses the edge itself originated to an
 	// out-of-dialog INVITE, one counter per (fixed) reason (invite.go).
 	inviteRejects [numInviteRejects]atomic.Uint64
@@ -164,6 +168,9 @@ func (m *Metrics) AdmissionDropped(r dropReason) { m.admissionDrops[r].Add(1) }
 
 // CallEnded counts one confirmed call that ended, by reason.
 func (m *Metrics) CallEnded(r endReason) { m.callsEnded[r].Add(1) }
+
+// AckMissed counts one 2xx ACK that never arrived from plane p.
+func (m *Metrics) AckMissed(p plane) { m.ackMissed[p].Add(1) }
 
 // InviteRejected counts one out-of-dialog INVITE the edge refused itself.
 func (m *Metrics) InviteRejected(r inviteReject) { m.inviteRejects[r].Add(1) }
@@ -350,6 +357,10 @@ type Snapshot struct {
 	CallsEnded    map[string]uint64
 	InviteRejects map[string]uint64
 
+	// AckMissed is the 2xx ACKs that never came, keyed by the plane that
+	// owed them ("public", "private"); both are always present.
+	AckMissed map[string]uint64
+
 	// StreamConnections is the open stream connections by lower-case
 	// transport (tcp, tls, ws, wss), every one present. StreamRefused is
 	// keyed by refusal reason and StreamClosed by policy-close reason, every
@@ -391,6 +402,7 @@ func (m *Metrics) Snapshot() Snapshot {
 		AdmissionDrops:              map[string]uint64{},
 		CallsEnded:                  map[string]uint64{},
 		InviteRejects:               map[string]uint64{},
+		AckMissed:                   map[string]uint64{},
 		ParseFailures:               map[string]uint64{},
 		CarrierRequests:             map[string]uint64{},
 		CarrierRegistrations:        map[string]int64{},
@@ -428,6 +440,9 @@ func (m *Metrics) Snapshot() Snapshot {
 	}
 	for r := range m.callsEnded {
 		s.CallsEnded[endReasonLabels[r]] = m.callsEnded[r].Load()
+	}
+	for p := range m.ackMissed {
+		s.AckMissed[plane(p).String()] = m.ackMissed[p].Load()
 	}
 	for r := range m.inviteRejects {
 		s.InviteRejects[inviteRejectLabels[r]] = m.inviteRejects[r].Load()

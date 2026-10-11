@@ -174,6 +174,9 @@ func (s *Server) owedExpired(d *dialog, o *owedAnswer) {
 		o.release()
 	}
 	s.log.Warn("answer to a delayed offer never arrived; ending the call", "sip_call_id", d.callID)
+	// The answer rides the ACK, so a 2xx ACK still owed is an ACK miss too
+	// (counted once; the reason stays answer_timeout).
+	s.noteAckMiss(d)
 	if d.end(endAnswerTimeout) {
 		s.byeBothEnds(d, endAnswerTimeout)
 	}

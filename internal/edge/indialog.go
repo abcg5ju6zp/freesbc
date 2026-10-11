@@ -338,6 +338,7 @@ func (s *Server) onAck(req *sip.Request, tx sip.ServerTransaction, in inbound) {
 	if d != nil {
 		d.ackMu.Lock()
 		defer d.ackMu.Unlock()
+		d.clearAck(from.plane, fsip.CSeqNumber(req))
 		owed = d.takeOwed(from.plane, fsip.CSeqNumber(req))
 	}
 	if owed != nil {
@@ -683,14 +684,22 @@ func (s *Server) onInDialog(req *sip.Request, tx sip.ServerTransaction, in inbou
 		// The media ends as soon as the dialog does, rather than waiting
 		// for the silence watchdog — the difference between a port
 		// returning to the pool immediately and minutes later.
-		why := endByeCallee
+		why, by := endByeCallee, byCallee
+		if from.plane == d.callerPlane {
+			why, by = endByeCaller, byCaller
+		}
 		switch {
+		case d.ackOwedByOther(from.plane):
+			// The 2xx sender hangs up before the ACK it is owed: it gave
+			// up on the ACK (RFC 3261 §15 allows no other BYE here). Checked
+			// before err, because a caller that never ACKed often never
+			// answers the relayed BYE either.
+			s.noteAckMiss(d)
+			why = endAckTimeout
 		case err != nil:
 			why = endByeUnanswered
-		case from.plane == d.callerPlane:
-			why = endByeCaller
 		}
-		d.end(why)
+		d.endBy(why, by)
 	}
 }
 

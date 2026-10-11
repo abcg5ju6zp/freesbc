@@ -21,6 +21,10 @@ const (
 	// banCapQuiet is how long the shield's BanAddsRejected counter must
 	// stand still before shield_ban_cap clears.
 	banCapQuiet = 60 * time.Second
+	// ackMissThreshold misses of one plane within ackMissWindow raise
+	// ack_missed:<plane>; it clears when the window holds fewer.
+	ackMissThreshold = 3
+	ackMissWindow    = 10 * time.Minute
 )
 
 // Conditions deliberately absent:
@@ -45,6 +49,8 @@ type healthInputs struct {
 	// AdminPlainRemote is true when admin serves plain HTTP on a
 	// non-loopback address.
 	AdminPlainRemote bool
+	// AckMisses is the recent 2xx ACK misses per plane, over ackMissWindow.
+	AckMisses []edge.AckMiss
 }
 
 // healthSource derives the raw active conditions from healthInputs. Only
@@ -75,6 +81,7 @@ func newHealthSource(edgeSrv *edge.Server, running *config.Config, reload func()
 			PortsTotal:       total,
 			BanRejected:      edgeSrv.ShieldStats().BanAddsRejected,
 			AdminPlainRemote: plain,
+			AckMisses:        edgeSrv.AckMisses(ackMissWindow),
 		}
 	}}
 }
@@ -179,6 +186,22 @@ func (h *healthSource) derive(in healthInputs) []admin.HealthCondition {
 			Severity: admin.HealthDegraded,
 			Message:  "the shield ban table is at its cap and refusing new bans",
 			Detail:   fmt.Sprintf("%d ban additions refused so far", in.BanRejected),
+		})
+	}
+
+	for _, m := range in.AckMisses {
+		if m.Recent < ackMissThreshold {
+			continue
+		}
+		msg := fmt.Sprintf("2xx ACKs are not returning from the public side; verify that %s (Contact/Record-Route) is reachable through NAT/firewall", m.Endpoint)
+		if m.Plane == "private" {
+			msg = fmt.Sprintf("2xx ACKs are not returning from the switch; verify that the switch can reach %s (the private SIP socket)", m.Endpoint)
+		}
+		out = append(out, admin.HealthCondition{
+			ID:       "ack_missed:" + m.Plane,
+			Severity: admin.HealthDegraded,
+			Message:  msg,
+			Detail:   fmt.Sprintf("%d missed ACKs in the last %s", m.Recent, ackMissWindow),
 		})
 	}
 

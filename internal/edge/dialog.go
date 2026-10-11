@@ -68,6 +68,11 @@ const (
 	endMediaFault
 	// endShutdown: the process is shutting down.
 	endShutdown
+	// endAckTimeout: the caller's ACK for the 2xx never arrived (ack.go).
+	// Either the callee gave up first and sent its BYE while the ACK was
+	// still owed (terminated by the callee), or FreeSBC's own backstop
+	// fired (terminated by the proxy).
+	endAckTimeout
 	numEndReasons
 )
 
@@ -83,6 +88,32 @@ var endReasonLabels = [numEndReasons]string{
 	endAnswerUnusable:  "answer_unusable",
 	endMediaFault:      "media_fault",
 	endShutdown:        "shutdown",
+	endAckTimeout:      "ack_timeout",
+}
+
+// terminator is who ended a call, for the "terminated_by" log field: the
+// caller or the callee (a BYE, or the callee's give-up on a missing ACK) or
+// the proxy itself (a timer, the media, a refusal, shutdown). "Callee" is
+// the side that sent the 2xx, whichever plane it is on.
+type terminator string
+
+const (
+	byCaller terminator = "caller"
+	byCallee terminator = "callee"
+	byProxy  terminator = "proxy"
+)
+
+// terminator is who ends a call for this reason unless the call site knows
+// better. endByeUnanswered defaults to the proxy; the BYE handler passes
+// the side that sent the BYE.
+func (r endReason) terminator() terminator {
+	switch r {
+	case endByeCaller:
+		return byCaller
+	case endByeCallee:
+		return byCallee
+	}
+	return byProxy
 }
 
 func (r endReason) String() string { return endReasonLabels[r] }
@@ -302,6 +333,8 @@ type dialog struct {
 	// in a reliable 18x, the PRACK). At most one is outstanding, and while
 	// it is no other offer is forwarded in the dialog.
 	owed *owedAnswer
+	// ack is the 2xx ACK still owed (ack.go); nil once it arrived.
+	ack *ackOwed
 	// lastAck is the answer the last owed answer was rebuilt into, kept so
 	// that a retransmitted ACK (the first never reached the callee, which
 	// retransmits its 2xx) is restated rather than stripped. It is cleared
@@ -1195,6 +1228,11 @@ func (d *dialog) endUnlessUp() {
 // whose reason is recorded. It reports whether this call ended a confirmed
 // dialog.
 func (d *dialog) end(reason endReason) bool {
+	return d.endBy(reason, reason.terminator())
+}
+
+// endBy is end with the side that ended the call named for the log.
+func (d *dialog) endBy(reason endReason, by terminator) bool {
 	t := d.tab
 	t.mu.Lock()
 	if d.state == dialogEnded {
@@ -1209,6 +1247,10 @@ func (d *dialog) end(reason endReason) bool {
 		d.owed.timer.Stop()
 	}
 	d.owed = nil
+	if d.ack != nil && d.ack.timer != nil {
+		d.ack.timer.Stop()
+	}
+	d.ack = nil
 	d.lastAck = nil
 	sess := d.media
 	t.removeLocked(d)
@@ -1231,7 +1273,7 @@ func (d *dialog) end(reason endReason) bool {
 	t.metrics.MediaEnded(webrtc, sess, sess.Stats)
 	t.metrics.CallEnded(reason)
 	t.log.Info("call ended", "sip_call_id", d.callID, "reason", reason.String(),
-		"duration", time.Since(confirmedAt).Round(time.Millisecond),
+		"terminated_by", string(by), "duration", time.Since(confirmedAt).Round(time.Millisecond),
 		"webrtc", webrtc, "carrier", carrier, "stats", st)
 	return true
 }

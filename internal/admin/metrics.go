@@ -48,6 +48,7 @@ type collector struct {
 	proxyDraining   *prometheus.Desc
 	proxyAdmission  *prometheus.Desc
 	proxyCallsEnded *prometheus.Desc
+	proxyAckMissed  *prometheus.Desc
 	proxyRejects    *prometheus.Desc
 	proxyParseFail  *prometheus.Desc
 	proxyStreams    *prometheus.Desc
@@ -102,6 +103,7 @@ func newCollector(deps Deps, audit *auditLog, health *healthTracker, tlsRec func
 		proxyParseFail:  prometheus.NewDesc("freesbc_sip_parse_failures_total", "Reads the SIP parser rejected (malformed messages), by transport; the payload is never logged.", []string{"transport"}, nil),
 		proxyAdmission:  prometheus.NewDesc("freesbc_edge_admission_drops_total", "Public requests the edge proxy dropped silently by admission, by reason.", []string{"reason"}, nil),
 		proxyCallsEnded: prometheus.NewDesc("freesbc_edge_calls_ended_total", "Confirmed calls that ended, by reason.", []string{"reason"}, nil),
+		proxyAckMissed:  prometheus.NewDesc("freesbc_edge_ack_missed_total", "2xx ACKs that never arrived, by the plane that owed them.", []string{"plane"}, nil),
 		proxyStreams:    prometheus.NewDesc("freesbc_edge_stream_connections", "Open public stream connections (tcp, tls, ws, wss), by transport.", []string{"transport"}, nil),
 		proxyStreamRef:  prometheus.NewDesc("freesbc_edge_stream_refused_total", "Stream connections refused at accept, by reason (global_cap, ip_cap, banned, rate).", []string{"reason"}, nil),
 		proxyStreamCls:  prometheus.NewDesc("freesbc_edge_stream_closed_total", "Stream connections closed by policy, by reason (idle, slow, oversize, malformed, handshake, rate).", []string{"reason"}, nil),
@@ -129,7 +131,7 @@ func (c *collector) Describe(ch chan<- *prometheus.Desc) {
 		c.proxyRegTotal, c.proxyRegFailure, c.proxyReqIn, c.proxyResOut,
 		c.proxyRTPPktRx, c.proxyRTPPktTx, c.proxyRTPByteRx, c.proxyRTPByteTx,
 		c.proxyPortFail, c.proxyICEFail, c.proxyDTLSFail, c.proxyPanics,
-		c.proxyAdmission, c.proxyCallsEnded, c.proxyRejects, c.proxyParseFail, c.proxyStreams, c.proxyStreamRef, c.proxyStreamCls, c.proxyCarrierReq, c.proxyCarrierReg,
+		c.proxyAdmission, c.proxyCallsEnded, c.proxyAckMissed, c.proxyRejects, c.proxyParseFail, c.proxyStreams, c.proxyStreamRef, c.proxyStreamCls, c.proxyCarrierReq, c.proxyCarrierReg,
 	} {
 		ch <- d
 	}
@@ -220,6 +222,9 @@ func (c *collector) Collect(ch chan<- prometheus.Metric) {
 	}
 	for reason, v := range p.CallsEnded {
 		counter(c.proxyCallsEnded, float64(v), reason)
+	}
+	for plane, v := range p.AckMissed {
+		counter(c.proxyAckMissed, float64(v), plane)
 	}
 	for reason, v := range p.InviteRejects {
 		counter(c.proxyRejects, float64(v), reason)

@@ -96,6 +96,35 @@ func TestMetricsCallEndAndRejectCounters(t *testing.T) {
 	}
 }
 
+// freesbc_edge_ack_missed_total exports both planes, including from zero.
+func TestMetricsAckMissedCounters(t *testing.T) {
+	deps := emptyDeps()
+	deps.Proxy = func() ProxyStats {
+		return ProxyStats{AckMissed: map[string]uint64{"public": 0, "private": 0}}
+	}
+	body := string(authGET(t, newTestServer(t, deps), "/metrics"))
+	for _, want := range []string{
+		`freesbc_edge_ack_missed_total{plane="public"} 0`,
+		`freesbc_edge_ack_missed_total{plane="private"} 0`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics missing %q", want)
+		}
+	}
+	deps.Proxy = func() ProxyStats {
+		return ProxyStats{AckMissed: map[string]uint64{"public": 5, "private": 1}}
+	}
+	body = string(authGET(t, newTestServer(t, deps), "/metrics"))
+	for _, want := range []string{
+		`freesbc_edge_ack_missed_total{plane="public"} 5`,
+		`freesbc_edge_ack_missed_total{plane="private"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics missing %q", want)
+		}
+	}
+}
+
 // The certificate expiry gauge carries not-after as Unix seconds under the
 // cert file path, and is absent when no certificate is loaded.
 func TestMetricsTLSCertExpiry(t *testing.T) {

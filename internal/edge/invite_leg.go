@@ -182,6 +182,7 @@ func (s *Server) relayInviteResponse(l *inviteLeg, res *sip.Response) error {
 			return errDialogGone
 		}
 		s.armOwedTimer(l.dialog())
+		s.armAckTimer(l.dialog(), fsip.CSeqNumber(l.req))
 		// What retransmissions of this 2xx are answered with.
 		l.dialog().setRelayed2xx(out.Clone())
 		return nil

@@ -33,6 +33,14 @@ const (
 	planePrivate
 )
 
+// String is the plane's metric label and log value.
+func (p plane) String() string {
+	if p == planePrivate {
+		return "private"
+	}
+	return "public"
+}
+
 // side is everything needed to put a message on one plane: the address
 // FreeSBC advertises there (Via sent-by, Contact, Record-Route) and the
 // local socket the message must leave from.

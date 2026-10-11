@@ -261,3 +261,36 @@ func TestAdminDepsHealthWired(t *testing.T) {
 		t.Errorf("fresh edge reports conditions %v", ids(got))
 	}
 }
+
+// ack_missed:<plane> is raised at ackMissThreshold misses within the
+// window the edge counts over, names the advertised endpoint, and clears
+// once the window holds fewer.
+func TestHealthAckMissed(t *testing.T) {
+	h, _ := newTestHealth()
+	conds := func(public, private int) []admin.HealthCondition {
+		return h.derive(healthInputs{AckMisses: []edge.AckMiss{
+			{Plane: "public", Recent: public, Endpoint: "sip:203.0.113.7:5060"},
+			{Plane: "private", Recent: private, Endpoint: "sip:10.77.0.2:5060"},
+		}})
+	}
+	if _, ok := find(t, conds(ackMissThreshold-1, ackMissThreshold-1), "ack_missed:public"); ok {
+		t.Fatal("raised below the threshold")
+	}
+	c, ok := find(t, conds(ackMissThreshold, 0), "ack_missed:public")
+	if !ok {
+		t.Fatal("public not raised at the threshold")
+	}
+	if c.Severity != admin.HealthDegraded || !strings.Contains(c.Message, "sip:203.0.113.7:5060") {
+		t.Errorf("public condition = %+v", c)
+	}
+	if _, ok := find(t, conds(ackMissThreshold, 0), "ack_missed:private"); ok {
+		t.Error("private raised by public misses")
+	}
+	c, ok = find(t, conds(0, ackMissThreshold+2), "ack_missed:private")
+	if !ok || !strings.Contains(c.Message, "sip:10.77.0.2:5060") {
+		t.Errorf("private condition = %+v, raised %v", c, ok)
+	}
+	if _, ok := find(t, conds(0, 0), "ack_missed:private"); ok {
+		t.Error("not cleared when the window holds none")
+	}
+}

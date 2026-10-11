@@ -162,6 +162,10 @@ type ProxyStats struct {
 	// inviteRejectLabels).
 	InviteRejects map[string]uint64 `json:"invite_rejects_total"`
 
+	// AckMissed counts 2xx ACKs that never arrived, by the plane that owed
+	// them (public or private).
+	AckMissed map[string]uint64 `json:"ack_missed_total"`
+
 	// CarrierRequests counts carrier-path requests, keyed
 	// "carrier/direction/method" (direction: inbound or outbound).
 	CarrierRequests map[string]uint64 `json:"carrier_requests_total"`

@@ -203,6 +203,7 @@ func adminDeps(edgeSrv *edge.Server, version string, running *config.Config, sto
 				AdmissionDrops:         s.AdmissionDrops,
 				CallsEnded:             s.CallsEnded,
 				InviteRejects:          s.InviteRejects,
+				AckMissed:              s.AckMissed,
 				ParseFailures:          s.ParseFailures,
 				StreamConnections:      s.StreamConnections,
 				StreamRefused:          s.StreamRefused,

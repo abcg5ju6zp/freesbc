@@ -36,8 +36,8 @@ See [`freesbc.example.yaml`](../freesbc.example.yaml) for a complete annotated c
 | WebRTC | ICE-Lite, DTLS, SRTP/SRTCP with RTCP-mux, built directly on `pion/ice`, `pion/dtls` and `pion/srtp` (no `PeerConnection`). The DTLS identity is a per-process self-signed certificate. The peer certificate is checked against the signalled `a=fingerprint` inside the DTLS handshake, so a mismatched peer never gets SRTP keys and no media is relayed for it. Both call directions: a browser's own offer is answered, and a call the switch places to a client registered over ws or wss gets FreeSBC's own DTLS-SRTP offer (`a=setup:actpass`), whose leg starts when the browser answers. Enabled by `edge.listen.ws` or `wss`. Manual real-browser test: [`docs/smoke/webrtc-dtls.md`](smoke/webrtc-dtls.md). |
 | DTMF | RFC 4733 telephone-event traverses the relay untouched; SIP INFO is proxied as signaling. |
 | re-INVITE | Hold, unhold, session-timer refresh and codec changes are renegotiated with the anchor intact: the body is rebuilt for the far side on the ports the session already holds, and a WebRTC leg keeps its ICE credentials, fingerprint and DTLS role, so media is never interrupted. A re-INVITE that moves either side's media address re-points the anchor to it once the 2xx completes the exchange; one whose 2xx cannot be anchored is ACKed and the call is ended on both sides. |
-| Dialogs | Identified by Call-ID and both tags (RFC 3261 §12): only a BYE that names the dialog's tags, and that its far end accepts, ends it. The dialog is on record before its 2xx is relayed, so an immediate ACK always finds it; 2xx retransmissions are relayed until Timer M. |
-| Lifecycle | Media is released deterministically on BYE (from either side), CANCEL, a failed final response, dialog teardown, media silence (5 minutes) and shutdown. A 2xx whose SDP cannot be anchored, one from a second fork, or one that races a CANCEL is ACKed and BYEd rather than left as a zombie dialog. When media silence from either end (or a DTLS fingerprint mismatch) ends a call, both endpoints are sent a BYE. A CANCEL is relayed without holding up the caller's 487, and an INVITE that outlives its 5-minute backstop is CANCELled and answered 408. |
+| Dialogs | Identified by Call-ID and both tags (RFC 3261 §12): only a BYE that names the dialog's tags, and that its far end accepts, ends it. The dialog is on record before its 2xx is relayed, so an immediate ACK always finds it; 2xx retransmissions are relayed until Timer M. A 2xx whose ACK never arrives ends the call as `ack_timeout` (counted in `freesbc_edge_ack_missed_total{plane}`; see the NAT/firewall note below). |
+| Lifecycle | Media is released deterministically on BYE (from either side), CANCEL, a failed final response, dialog teardown, media silence (5 minutes) and shutdown. A 2xx whose SDP cannot be anchored, one from a second fork, or one that races a CANCEL is ACKed and BYEd rather than left as a zombie dialog. When media silence from either end (or a DTLS fingerprint mismatch) ends a call, both endpoints are sent a BYE. A CANCEL is relayed without holding up the caller's 487, and an INVITE that outlives its 5-minute backstop is CANCELled and answered 408. A call whose 2xx ACK does not arrive within 32 s is ended with a BYE to both ends (`ack_timeout`), unless the callee hung up first. |
 | Abuse | See [Admission and abuse controls](#admission-and-abuse-controls). |
 
 ## Admission and abuse controls
@@ -96,6 +96,24 @@ There is no AoR fallback.
 - A Request-URI carrying an outbound-registration token goes to the node that registered, with the Request-URI restored to that node's original Contact (so Asterisk `line=yes` and FreeSWITCH `${sip_gateway}` identification work).
 - With no token (the carrier addressed the DID) the request goes to a node chosen by the `hash-user` pool, Request-URI unchanged. An unknown or expired token is treated as no token.
 - FreeSBC adds `X-FreeSBC-Carrier: <name>`. A request from a `carrier_sources` address that matches no entry by address gets `X-FreeSBC-Carrier: unknown`.
+
+## Calls that end for a missing ACK
+
+FreeSBC watches the ACK of every initial INVITE's 2xx. When the ACK does not
+return, the callee gives up after 64·T1 (32 s) and BYEs a call that never
+really started; FreeSBC reports it as `reason=ack_timeout` in the `call ended`
+line (`terminated_by=callee` when the callee's BYE came first, `proxy` when
+FreeSBC's own 32 s timer fired and BYEd both ends) and counts it in
+`freesbc_edge_ack_missed_total{plane}`, where `plane` is the side whose ACK
+was missing. It is not a normal hangup. The usual cause is that the ACK
+cannot reach the address FreeSBC advertises in the 2xx Contact and
+Record-Route: a firewall or NAT that drops or rewrites it, a UDP/TCP/TLS
+mismatch, or an ALG. `plane="public"` means the endpoint's ACK did not reach
+the public listener; `plane="private"` means the switch's ACK did not reach
+`private.ip:5060`. FreeSBC logs a WARN with the address to check for the first
+miss of each plane and at most once a minute after that, and the health
+condition `ack_missed:<plane>` is raised at 3 misses within 10 minutes.
+Re-INVITE ACKs are not watched.
 
 ## Switch-side requirements
 

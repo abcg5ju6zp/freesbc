@@ -1443,6 +1443,26 @@ the switch's address in From/To the way §6 describes (`sendMiddleBye`,
 own later BYE would get 481. An early dialog is bounded by
 `inviteTimeout = 5 * time.Minute` (`invite.go:24`).
 
+**A missing 2xx ACK (`ack.go`).** When `relayInviteResponse` relays the 2xx
+of an initial INVITE it records the ACK the caller's plane owes
+(`armAckTimer`, `dialog.ack`: plane, INVITE CSeq) and, unless an owed answer
+already has its own backstop (`armOwedTimer`, §7.9a), starts a timer of
+`ackBudget()` (32 s, the 64·T1 horizon of RFC 3261 §13.3.1.4; the `ackWait` test seam).
+`onAck` clears the record when the ACK of that plane and CSeq arrives. A
+miss is noted once per transaction (`noteAckMiss`, `ackOwed.counted`) in
+three ways: the callee's BYE arrives while the ACK is still owed (the
+callee's own 64·T1 fires just before ours; RFC 3261 §15 allows no other BYE
+before the ACK), which is `ack_timeout` terminated by the callee and is
+checked before the relayed BYE's outcome, since a caller whose ACK is lost
+often misses the BYE too; the timer fires, which is `ack_timeout`
+terminated by the proxy followed by `byeBothEnds`; or `owedExpired` fires
+with the ACK also owed, which stays `answer_timeout` but is counted. A miss
+increments `freesbc_edge_ack_missed_total{plane}`, logs at Debug, and logs
+at WARN for the first miss of a plane and then at most once per
+`ackMissWarnEvery` (1 min) with a `suppressed` count and the advertised
+URI the ACK should have reached (`ackMissTracker`). Re-INVITE 2xx ACKs are
+not watched.
+
 **Why a call ended.** `end(reason)` takes an `endReason` (`dialog.go:45`), a
 closed set that is both the `reason` log value and the label of
 `freesbc_edge_calls_ended_total` (every label exported from the start, zero
@@ -1456,6 +1476,7 @@ included):
 | `dtls_failure` | the media watcher, a browser leg that failed to establish or whose peer could not be verified (`media.CloseLegFailed`: ICE, DTLS or fingerprint) |
 | `media_fault` | the media watcher, any other close the dialog did not ask for (a relay goroutine panicked, `media.CloseFault`) |
 | `reinvite_refused` | `onReInvite`, a re-INVITE 2xx whose answer cannot be anchored |
+| `ack_timeout` | `onInDialog` when the 2xx sender's BYE arrives while the caller's ACK is owed (terminated by the callee), or `ackExpired` (`ack.go`), the 32 s backstop (terminated by the proxy); see above |
 | `answer_timeout` | `owedExpired` (`offerless.go`), the 32 s backstop for an answer owed to a delayed offer (§7.9a) |
 | `answer_unusable` | the answer to a delayed offer in an ACK or PRACK, or the 2xx answer to an UPDATE, cannot be anchored |
 | `shutdown` | `closeAll` |
@@ -1466,8 +1487,12 @@ included):
 winning close stores before `Done` fires, so a later `Close` cannot rewrite
 it. `WebRTCSession.Fail` is the close the edge uses when it rejects a leg's
 peer itself. `end` logs `"call ended"` at Info for a confirmed dialog only,
-with `sip_call_id`, `reason`, `duration` (since `confirmedAt`), `webrtc`,
-`carrier` and the media `stats`, and counts the reason; an early dialog that
+with `sip_call_id`, `reason`, `terminated_by` (`caller`, `callee` or
+`proxy`: the side that sent the BYE for `bye_caller`, `bye_callee` and
+`bye_unanswered`, the callee for an `ack_timeout` caused by its BYE, the
+proxy for every timer, media, refusal and shutdown reason; `endBy` names it
+where the default of `end` is wrong), `duration` (since `confirmedAt`),
+`webrtc`, `carrier` and the media `stats`, and counts the reason; an early dialog that
 `endUnlessUp` ends is neither logged nor counted. `byeBothEnds` logs the same
 `reason` ("ending the call; sending BYE to both ends").
 
@@ -1582,7 +1607,8 @@ the media is not touched again (it is cleared when the next offer exchange
 starts); any other ACK body is dropped. `ackMu` makes a duplicate ACK that
 arrives at once wait for the first. An ACK cannot be refused, so an owed answer
 that is missing or unusable is forwarded without a body and the call is ended
-with a BYE to both sides.
+with a BYE to both sides. Every ACK also clears the 2xx ACK watch of its plane
+and INVITE CSeq (`clearAck`; see "A missing 2xx ACK" in §7.7).
 
 **CANCEL.** When sipgo matches a CANCEL to a live INVITE server transaction
 it writes 200 to the CANCEL, then feeds it to the INVITE server
@@ -3374,7 +3400,8 @@ permanent series per call."
 | `freesbc_edge_stream_refused_total` | Counter | `reason` ∈ {`global_cap`, `ip_cap`, `banned`, `rate`} | connections refused at accept (§7.1a); every reason is always exported |
 | `freesbc_edge_stream_closed_total` | Counter | `reason` ∈ {`idle`, `slow`, `oversize`, `malformed`, `handshake`, `rate`} | connections closed by stream policy (§7.1a); every reason is always exported |
 | `freesbc_edge_admission_drops_total` | Counter | `reason` ∈ {`invite_not_admitted`, `register_enumeration`, `subscribe_not_admitted`, `message_not_admitted`} | edge `dropSilently` (`admission.go:141`): a public out-of-dialog INVITE refused by admission (§7.5), a REGISTER from a source over the enumeration limit (§7.4), an out-of-dialog SUBSCRIBE or MESSAGE from a source without a live registration (§7.8a); every reason is always exported |
-| `freesbc_edge_calls_ended_total` | Counter | `reason` ∈ {`bye_caller`, `bye_callee`, `bye_unanswered`, `rtp_silence`, `dtls_failure`, `reinvite_refused`, `answer_timeout`, `answer_unusable`, `media_fault`, `shutdown`} | edge `dialog.end` (`dialog.go:1144`), one per confirmed call that ended, by the reason of the `end` that won (§7.7); every reason is always exported |
+| `freesbc_edge_calls_ended_total` | Counter | `reason` ∈ {`bye_caller`, `bye_callee`, `bye_unanswered`, `rtp_silence`, `dtls_failure`, `reinvite_refused`, `answer_timeout`, `answer_unusable`, `media_fault`, `shutdown`, `ack_timeout`} | edge `dialog.end` (`dialog.go:1144`), one per confirmed call that ended, by the reason of the `end` that won (§7.7); every reason is always exported |
+| `freesbc_edge_ack_missed_total` | Counter | `plane` ∈ {`public`, `private`}: the side that failed to ACK a 2xx | edge `noteAckMiss` (`ack.go`), once per missed ACK (§7.7); both planes are always exported |
 | `freesbc_edge_invite_rejects_total` | Counter | `reason` ∈ {`early_cap`, `shutting_down`, `loop_detected`, `no_public_side`, `webrtc_disabled`, `no_target`, `too_many_hops`, `media_failed`, `port_exhausted`, `upstream_failed`, `timeout`, `session_cap`, `invite_rate`, `draining`} | edge `rejectInvite` / `rejectBusy` (`invite.go:148`, `invite.go:187`), one per final response the edge itself sends to an out-of-dialog INVITE (§7.7); every reason is always exported |
 | `freesbc_edge_carrier_requests_total` | Counter | `carrier` (an `edge.carriers` name or `unknown`), `direction` ∈ {`inbound` (carrier to switch), `outbound` (switch to carrier)}, `method` (folded like `sip_requests_total`) | edge `Metrics.CarrierRequest` (§6) |
 | `freesbc_edge_carrier_registrations` | Gauge | `carrier` | live carrier registrations per `edge.carriers` name, republished from the carrier registration table on every change and every prune tick (`carrierreg.go:126`) |
@@ -3394,9 +3421,9 @@ There is no config-reload metric and no carrier DNS metric.
 | Level | Examples |
 |---|---|
 | `Error` | `"proxy handler panic"` (+ stack); `"registration binding rejected"`; `"rejecting call: media ports exhausted"`; media relay panic (`"media relay panic; killing session"`); `"admin handler panic"` (+ stack); `"config watcher error"`, `"config reload failed, keeping previous config"`; `"config watcher exited"`, `"edge proxy exited"`, `"admin server exited"` |
-| `Warn` | `"config reload changes restart-only settings; …"`; `"config written via admin API"`; `shield banned scanner`; `"public request dropped by admission; …"` (the first drop per source IP and reason, remembered in a FIFO set capped at 4096, `maxWarnedSources`, `admission.go:116`); `"REGISTER enumeration limit reached; …"`; `"rejecting call: too many unanswered calls from one source"`; `"upstream INVITE unanswered; entering cooldown"` / `"upstream REGISTER unanswered; entering cooldown"`; `"forward INVITE upstream"` / `"forward INVITE to client"` / `"forward INVITE to carrier"` / `"forward carrier REGISTER"` failures; `"carrier has no resolved address"`; `"carrier DNS lookup failed; keeping the last good addresses"`; `"carrier request names an unknown or expired registration token; …"`; `"webrtc leg failed"`; the fingerprint-mismatch teardown; `"rejecting call to WebSocket client: …"` (a WebSocket client with no ws/wss listener cannot be offered DTLS-SRTP) |
-| `Info` | `"edge proxy listening"`, `"media planes ready"`, `"freesbc started"`, `"shutting down"`, `"admin server listening"`, `"config reloaded"`; `"proxying INVITE upstream"` / `"proxying INVITE to client"` / `"proxying INVITE to carrier"`; `"carrier registration"` with the granted expiry; `"carrier resolved"`; `"registration accepted"` / `"removed"` / `"rejected"`; `"webrtc media established"`; `"rejecting call: media not negotiable"`; `"ending the call; sending BYE to both ends"` with the `reason`; `"call ended"` with `reason`, `duration`, `webrtc`, `carrier` and media stats |
-| `Debug` | dialog ACK/BYE bookkeeping; shield rate-limit drops and scanner-datagram drops; edge `"public request dropped by admission"` after the first per source; `"in-dialog request without a dialog record; hashing upstream"` and its carrier variant; `"pruned expired registration bindings"` / `"pruned expired carrier registrations"`; `"carrier DNS lookup still failing"`; `"forward carrier OPTIONS"`; dropped unroutable responses |
+| `Warn` | `"config reload changes restart-only settings; …"`; `"config written via admin API"`; `shield banned scanner`; `"public request dropped by admission; …"` (the first drop per source IP and reason, remembered in a FIFO set capped at 4096, `maxWarnedSources`, `admission.go:116`); `"REGISTER enumeration limit reached; …"`; `"rejecting call: too many unanswered calls from one source"`; `"upstream INVITE unanswered; entering cooldown"` / `"upstream REGISTER unanswered; entering cooldown"`; `"forward INVITE upstream"` / `"forward INVITE to client"` / `"forward INVITE to carrier"` / `"forward carrier REGISTER"` failures; `"carrier has no resolved address"`; `"carrier DNS lookup failed; keeping the last good addresses"`; `"carrier request names an unknown or expired registration token; …"`; `"2xx ACK never arrived; …"` (the first miss per plane, then at most one per minute, with `suppressed`); `"webrtc leg failed"`; the fingerprint-mismatch teardown; `"rejecting call to WebSocket client: …"` (a WebSocket client with no ws/wss listener cannot be offered DTLS-SRTP) |
+| `Info` | `"edge proxy listening"`, `"media planes ready"`, `"freesbc started"`, `"shutting down"`, `"admin server listening"`, `"config reloaded"`; `"proxying INVITE upstream"` / `"proxying INVITE to client"` / `"proxying INVITE to carrier"`; `"carrier registration"` with the granted expiry; `"carrier resolved"`; `"registration accepted"` / `"removed"` / `"rejected"`; `"webrtc media established"`; `"rejecting call: media not negotiable"`; `"ending the call; sending BYE to both ends"` with the `reason`; `"call ended"` with `reason`, `terminated_by`, `duration`, `webrtc`, `carrier` and media stats |
+| `Debug` | dialog ACK/BYE bookkeeping; `"2xx ACK never arrived"` for every miss; shield rate-limit drops and scanner-datagram drops; edge `"public request dropped by admission"` after the first per source; `"in-dialog request without a dialog record; hashing upstream"` and its carrier variant; `"pruned expired registration bindings"` / `"pruned expired carrier registrations"`; `"carrier DNS lookup still failing"`; `"forward carrier OPTIONS"`; dropped unroutable responses |
 
 sipgo's transport, transaction and server layers log through the same logger
 with `caller=sipgo`. Credentials, digest nonces, ICE passwords and DTLS
@@ -3583,6 +3610,7 @@ record an outcome, never across a DNS lookup, so `Server.Carriers` (and with it
 | `config_restart_required` | `degraded` | `ReloadStatus.RestartRequired` is non-empty; `detail` lists the restart-only keys whose file value the running process does not use. Cleared by a restart (or by reverting the file) |
 | `rtp_ports` | `degraded` at 90 % or more of the pairs in use; `critical` at 100 % | `edge.Server.PortStats`; `portsDegradedPercent` is a constant, not a config key |
 | `shield_ban_cap` | `degraded` | `Shield.Stats().BanAddsRejected` rose since the previous evaluation; cleared when it has not risen for `banCapQuiet` = **60 s** (state in `healthSource`, which sees every evaluation) |
+| `ack_missed:<plane>` (`public` or `private`) | `degraded` | `edge.Server.AckMisses`: at least `ackMissThreshold` = **3** 2xx ACK misses of that plane within `ackMissWindow` = **10 min** (`ackMissTracker` keeps the last 32 miss times per plane); the message names the advertised Contact/Record-Route URI to check for NAT/firewall reachability. Clears when the window holds fewer |
 | `tls_cert_expiry` | `degraded` under 30 days to not-after (`tlsExpiryWarn`); `critical` once expired | the top-level `tls` leaf the process loaded (the same record as `/api/tls`, `Server.tlsRecord`); added by admin itself (`Server.healthConditions`, `tlscert.go`) on top of `Deps.Health`. It never reads the cert file, so a renewal on disk is shown by `/api/tls` (`disk_differs`) only. Absent when no leaf is loaded |
 | `admin_plain_remote` | `critical` | admin would serve plain HTTP on a non-loopback address; validation makes it impossible, so this is a sanity check |
 
@@ -3996,6 +4024,9 @@ code constant.
 | carrier DNS negative cache | 10 s (`carrierDNSNegTTL`, `carrierdns.go:45`) | a failed or empty lookup; the directory checks for expired entries every 5 s |
 | carrier DNS lookup | 3 s (`carrierLookupTimeout`, `carrierdns.go:47`) | one DNS query |
 | `healthInterval` | 5 s (`health.go:91`) | the admin health tracker's own evaluation tick (§13.6) |
+| `ackMissThreshold`, `ackMissWindow` | 3 misses, 10 min (`app/health.go:26`) | when `ack_missed:<plane>` is raised and cleared |
+| `ackMissWarnEvery` | 1 min per plane (`ack.go:22`) | spacing of the missed-ACK WARN lines |
+| `ackTimeout` (`ackBudget`) | 32 s (`edge.go`) | also the wait for a 2xx ACK before `ack_timeout` ends the call (`ack.go`) |
 | `banCapQuiet` | 60 s (`app/health.go:22`) | how long `BanAddsRejected` must stand still before `shield_ban_cap` clears |
 | `shield.ban` | 1 h (config); a UDP socket ban at most 1 min (`socketBanMax`) | a scanner ban |
 | shield prune tick | 1 min (`shield.go:239`) | expired bans and idle rate-limit buckets |

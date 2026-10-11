@@ -24,10 +24,15 @@ type Options struct {
 	Version    string
 }
 
-// Check validates a config file without starting anything.
-func Check(path string) error {
-	_, err := config.Load(path)
-	return err
+// Check validates a config file without starting anything. note is extra
+// text for the caller to print after the success message: the 1:1 NAT
+// port-forward checklist, empty otherwise.
+func Check(path string) (note string, err error) {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return "", err
+	}
+	return cfg.NATChecklist(), nil
 }
 
 // Run loads the config, starts every configured component and blocks until
@@ -52,6 +57,18 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 	store := config.NewStore(cfg)
+
+	if cfg.NATMode() {
+		// Whether the router forwards these ports cannot be probed from
+		// here; a missing one shows up as calls that die at 32 s (ACK missed).
+		fw := cfg.NATForwards()
+		ports := make([]string, len(fw))
+		for i, f := range fw {
+			ports[i] = f.String()
+		}
+		log.Warn("1:1 NAT: the router must forward these ports to public.bind, same numbers; in-dialog requests (2xx ACK, BYE) use Contact/Record-Route, not Via",
+			"advertised", cfg.Public.IP, "forward_to", cfg.Public.Bind, "ports", ports)
+	}
 
 	// The edge: public SIP/UDP + WS/WSS toward phones, browsers and
 	// carriers, the switch behind it, media anchored through the SBC.
@@ -126,8 +143,15 @@ func adminDeps(edgeSrv *edge.Server, version string, running *config.Config, sto
 		DrainState:  edgeSrv.DrainState,
 		SetDraining: edgeSrv.SetDraining,
 		Listeners:   edgeSrv.Listeners,
-		TLSCert:     edgeSrv.TLSCert,
-		Health:      newHealthSource(edgeSrv, running, store.ReloadStatus).conditions,
+		ListenerInfos: func() []admin.Listener {
+			out := []admin.Listener{}
+			for _, l := range edgeSrv.ListenerInfos() {
+				out = append(out, admin.Listener{Transport: l.Transport, Bind: l.Bind, Advertised: l.Advertised, Private: l.Private})
+			}
+			return out
+		},
+		TLSCert: edgeSrv.TLSCert,
+		Health:  newHealthSource(edgeSrv, running, store.ReloadStatus).conditions,
 		Shield: func() admin.ShieldStats {
 			return admin.ShieldStats{DropsByReason: edgeSrv.ShieldStats().DropsByReason}
 		},

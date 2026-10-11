@@ -428,6 +428,35 @@ func (s *Server) TLSCert() (leaf *x509.Certificate, loadedAt time.Time, users []
 	return s.tlsLeaf, s.tlsLoaded, append([]string(nil), s.tlsUsers...)
 }
 
+// ListenerInfo is one bound socket and the address FreeSBC advertises for
+// it. They differ on a public listener behind 1:1 NAT (public.bind against
+// public.ip); the private socket advertises its bind.
+type ListenerInfo struct {
+	Transport  string
+	Bind       string
+	Advertised string
+	Private    bool
+}
+
+// ListenerInfos is Listeners with the advertised address beside each bound
+// one, from the startup snapshot.
+func (s *Server) ListenerInfos() []ListenerInfo {
+	var out []ListenerInfo
+	for _, l := range s.publicListeners() {
+		out = append(out, ListenerInfo{Transport: l.transport, Bind: l.addr, Advertised: s.advertisedAddr(l)})
+	}
+	return append(out, ListenerInfo{Transport: "udp", Bind: s.privAddr.String(), Advertised: s.privAddr.String(), Private: true})
+}
+
+// advertisedAddr is public.ip with the listener's port.
+func (s *Server) advertisedAddr(l bound) string {
+	ap, err := netip.ParseAddrPort(l.addr)
+	if err != nil {
+		return l.addr // unreachable: publicListeners built it from an AddrPort
+	}
+	return netip.AddrPortFrom(s.boot.PublicIP(), ap.Port()).String()
+}
+
 type bound struct {
 	transport string
 	addr      string
@@ -613,8 +642,17 @@ func (s *Server) Run(ctx context.Context) error {
 		s.subs.closeAll()
 		return err
 	}
+	var advertised, binds []string
+	for _, l := range s.publicListeners() {
+		advertised = append(advertised, l.transport+"://"+s.advertisedAddr(l))
+		binds = append(binds, l.transport+"://"+l.addr)
+	}
 	s.log.Info("edge proxy listening",
 		"public_listeners", len(s.publicListeners()),
+		// Equal outside 1:1 NAT. Behind it clients are told advertised, and
+		// the router must forward each to its bind.
+		"advertised", advertised,
+		"bind", binds,
 		"private", s.privAddr.String(),
 		"switches", len(s.topo.upstreamNames),
 		"switch_nodes", strings.Join(s.topo.upstreamNames, ","),

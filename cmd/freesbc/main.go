@@ -129,11 +129,13 @@ func run(args []string) int {
 		}
 		return 0
 	case "check":
-		if err := app.Check(*cfgPath); err != nil {
+		note, err := app.Check(*cfgPath)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			return 1
 		}
 		fmt.Printf("%s: config OK\n", *cfgPath)
+		fmt.Print(note)
 		return 0
 	case "run":
 		opts := app.Options{

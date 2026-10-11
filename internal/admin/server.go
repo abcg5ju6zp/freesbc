@@ -56,6 +56,9 @@ type Deps struct {
 	// transport://host:port. They are restart-only, so this comes from the
 	// startup snapshot, never the hot-reloaded config. Nil lists none.
 	Listeners func() []string
+	// ListenerInfos is Listeners with the advertised address beside each
+	// bound one (they differ behind 1:1 NAT). Nil lists none.
+	ListenerInfos func() []Listener
 	// Running returns the config snapshot the process started with, the
 	// baseline POST /api/config/validate compares a candidate against to
 	// list restart-only changes. Nil falls back to the store's current

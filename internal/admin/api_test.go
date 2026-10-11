@@ -23,6 +23,35 @@ func TestAPIStatus(t *testing.T) {
 	}
 }
 
+// listener_info pairs each bound listener with its advertised address, and
+// the older listeners strings stay.
+func TestAPIStatusListenerInfo(t *testing.T) {
+	deps := emptyDeps()
+	deps.Listeners = func() []string { return []string{"udp://172.20.0.4:5060"} }
+	deps.ListenerInfos = func() []Listener {
+		return []Listener{{Transport: "udp", Bind: "172.20.0.4:5060", Advertised: "223.76.90.4:5060"}}
+	}
+	var st struct {
+		Listeners []string `json:"listeners"`
+		Info      []struct {
+			Transport, Bind, Advertised string
+			Private                     bool
+		} `json:"listener_info"`
+	}
+	if err := json.Unmarshal(authGET(t, newTestServer(t, deps), "/api/status"), &st); err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Listeners) != 1 || len(st.Info) != 1 || st.Info[0].Advertised != "223.76.90.4:5060" || st.Info[0].Bind != "172.20.0.4:5060" {
+		t.Errorf("status = %+v", st)
+	}
+	var none struct {
+		Info []any `json:"listener_info"`
+	}
+	if err := json.Unmarshal(authGET(t, testServer(t), "/api/status"), &none); err != nil || none.Info == nil {
+		t.Errorf("listener_info without deps = %v (err %v), want []", none.Info, err)
+	}
+}
+
 func TestAPICalls(t *testing.T) {
 	// override the Calls dep to return one call, assert it's reflected.
 	s := testServerWithCalls(t, []Call{{ID: "abc", FromPeer: "a", ToPeer: "b", StartUnixNano: time.Now().UnixNano()}})

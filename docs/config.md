@@ -41,7 +41,7 @@ The side facing phones, browsers and carriers.
 | Key | Default | Rules |
 |---|---|---|
 | `ip` | required | A literal IP, not `0.0.0.0` / `::`. Advertised in Contact, Via, Record-Route and SDP. |
-| `bind` | `ip` | A literal IP, not `0.0.0.0` / `::`. The local address every public socket binds. Set it only behind 1:1 NAT, where `ip` is not a local address. |
+| `bind` | `ip` | A literal IP, not `0.0.0.0` / `::`. The local address every public socket binds. Set it only behind 1:1 NAT, where `ip` is not a local address. When `bind` differs from `ip` (NAT mode), FreeSBC advertises `ip` in Via, Contact, Record-Route and SDP but cannot tell whether the router forwards the ports to `bind`; see "1:1 NAT checklist" below. |
 
 ### `private`
 
@@ -52,6 +52,21 @@ The side facing the switch.
 | `ip` | required | A literal IP, not `0.0.0.0` / `::`, and different from the effective `public.bind`. Both the bind and the advertised address. |
 
 The private SIP socket is fixed at `private.ip:5060` (`config.PrivateSIPPort`) and cannot be configured.
+
+#### 1:1 NAT checklist
+
+When `public.bind` differs from `public.ip`, `freesbc check` prints, `freesbc init` prints after writing the file, and `freesbc run` logs at WARN (`1:1 NAT: the router must forward ...`) the advertised endpoint and the ports the router must forward to `public.bind`, with the same port numbers on both sides: every configured `edge.listen` port (`udp` over UDP; `tcp`, `tls`, `ws`, `wss` over TCP) and the whole `rtp` range over UDP. Nothing else binds `public.bind` (the admin API has its own `admin.listen`, the private socket is `private.ip`). Responses follow Via/rport and work without a forward, but in-dialog requests (the 2xx ACK, BYE) follow Contact and Record-Route to `public.ip:<port>`; a missing forward therefore shows as every call ending at 32 s with `ACK missed`. `check` exit codes are unchanged. The `edge proxy listening` line shows `advertised=[...]` and `bind=[...]` side by side, and `GET /api/status` gives each listener's `advertised` address in `listener_info`.
+
+```
+NAT mode: advertised public endpoint = 223.76.90.4 (udp/16060 tcp/16060 tcp/7443 (wss) udp/16800-16900 (rtp))
+REQUIRED forwards -> 172.20.0.4 (same port numbers):
+  udp/16060
+  tcp/16060
+  tcp/7443 (wss)
+  udp/16800-16900 (rtp)
+in-dialog requests (2xx ACK, BYE) use Contact/Record-Route, not Via:
+these ports MUST be reachable from clients.
+```
 
 At startup `run` fails if `public.bind` or `private.ip` is not assigned to a local interface (`checkLocalAddr`, `internal/edge/edge.go:299`). `check` does not test this.
 

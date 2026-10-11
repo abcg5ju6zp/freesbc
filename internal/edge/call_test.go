@@ -226,10 +226,16 @@ func relayReaches(t *testing.T, from *net.UDPConn, via *net.UDPAddr, to *net.UDP
 // sendAck sends the 2xx ACK, which is a separate end-to-end transaction.
 func sendAck(t *testing.T, c *client, invite *sip.Request, res *sip.Response, dest string) {
 	t.Helper()
+	sendAckBranch(t, c, invite, res, dest, sip.GenerateBranchN(16))
+}
+
+// sendAckBranch is sendAck with the ACK's Via branch chosen by the caller.
+func sendAckBranch(t *testing.T, c *client, invite *sip.Request, res *sip.Response, dest, branch string) {
+	t.Helper()
 	ack := sip.NewRequest(sip.ACK, invite.Recipient)
 	via := &sip.ViaHeader{ProtocolName: "SIP", ProtocolVersion: "2.0",
 		Transport: strings.ToUpper(c.transport), Host: "127.0.0.1", Params: sip.NewParams()}
-	via.Params.Add("branch", sip.GenerateBranchN(16))
+	via.Params.Add("branch", branch)
 	ack.PrependHeader(via)
 	sip.CopyHeaders("From", invite, ack)
 	sip.CopyHeaders("Call-ID", invite, ack)

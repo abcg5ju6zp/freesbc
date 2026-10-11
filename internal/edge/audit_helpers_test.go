@@ -52,7 +52,9 @@ func auditOwnedGoroutines() (int, string) {
 		owned := strings.Contains(g, "freesbc/internal/edge.") ||
 			strings.Contains(g, "freesbc/internal/media.") ||
 			strings.Contains(g, "github.com/pion/")
-		if !owned || strings.Contains(g, "_test.go") {
+		// drainAcks lives as long as its sipgo INVITE transaction (Timer L,
+		// H or I, up to 32 s), by design, so it is not a leak.
+		if !owned || strings.Contains(g, "_test.go") || strings.Contains(g, "(*Server).drainAcks") {
 			continue
 		}
 		count++

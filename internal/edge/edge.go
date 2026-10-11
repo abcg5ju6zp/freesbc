@@ -947,6 +947,10 @@ func (s *Server) guard(next handler) func(*sip.Request, sip.ServerTransaction) {
 	return func(req *sip.Request, stx sip.ServerTransaction) {
 		req, arr := s.marker.take(req)
 		tx := &finalTracker{ServerTransaction: stx}
+		if req.Method == sip.INVITE {
+			// Registered first, so it runs last, after the panic path.
+			defer s.drainAcks(tx)
+		}
 		defer func() {
 			if r := recover(); r != nil {
 				s.metrics.HandlerPanicked()
@@ -984,6 +988,47 @@ func (s *Server) guard(next handler) func(*sip.Request, sip.ServerTransaction) {
 	}
 }
 
+// drainAcks reads the ACKs sipgo hands an INVITE server transaction.
+// sipgo routes an ACK that matches the transaction's key (same top Via
+// branch and sent-by) to the transaction, not to the ACK handler; it then
+// parks a goroutine until somebody reads tx.Acks() or the transaction ends,
+// and logs "ACK missed" at Warn when it ends first. That is every non-2xx
+// final (the hop-by-hop ACK reuses the INVITE branch, RFC 3261 §17.1.1.3),
+// including the 487 sipgo sends on a CANCEL, and also the 2xx ACK of a
+// client that wrongly reuses the INVITE branch.
+//
+// A non-2xx ACK is absorbed: the edge's own client transaction toward the
+// far end already ACKs that hop. A 2xx ACK is the end-to-end one, so it is
+// forwarded as any other ACK is. The goroutine ends with the transaction
+// (sipgo's Timer L, H or I, 32 s at most), which Done() reports on every
+// path, so it cannot leak.
+func (s *Server) drainAcks(tx *finalTracker) {
+	acks, done := tx.Acks(), tx.Done()
+	go func() {
+		for {
+			select {
+			case ack := <-acks:
+				s.onTxAck(ack, tx)
+			case <-done:
+				return
+			}
+		}
+	}()
+}
+
+// onTxAck handles one ACK that sipgo matched to an INVITE transaction.
+func (s *Server) onTxAck(ack *sip.Request, tx *finalTracker) {
+	if st := tx.final.Load(); st >= 200 && st < 300 {
+		s.log.Debug("ACK to 2xx reused the INVITE branch; forwarding", "sip_call_id", fsip.CallID(ack))
+		s.guard(s.onAck)(ack, tx.ServerTransaction)
+		return
+	}
+	// Only the call and the status are logged, never headers (the request
+	// still carries the internal arrival marker).
+	s.log.Debug("ACK to a non-2xx final absorbed",
+		"sip_call_id", fsip.CallID(ack), "status", tx.final.Load())
+}
+
 // closeStream hard-closes the tcp/tls/ws/wss connection from raddr, if
 // there is one, when its source is banned (P2-SHD-006): a verdict alone
 // would leave the client a socket whose every later message is still read
@@ -1001,15 +1046,17 @@ func (s *Server) closeStream(network, raddr string) {
 }
 
 // finalTracker is the server transaction guard hands a handler: it
-// records whether a final response has gone out on it, which is what the
-// panic path needs to know.
+// records whether a final response has gone out on it (and which), which
+// is what the panic path and drainAcks need to know.
 type finalTracker struct {
 	sip.ServerTransaction
 	finalised atomic.Bool
+	final     atomic.Int32 // status of the final response, 0 until sent
 }
 
 func (t *finalTracker) Respond(res *sip.Response) error {
 	if res.StatusCode >= 200 {
+		t.final.Store(int32(res.StatusCode))
 		t.finalised.Store(true)
 	}
 	return t.ServerTransaction.Respond(res)

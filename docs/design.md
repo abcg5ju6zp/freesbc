@@ -1571,9 +1571,16 @@ single Via would make it unroutable.
 
 **ACK** is forwarded **statelessly** with `WriteRequest` (`onAck`,
 `indialog.go:313`), because a 2xx ACK is a separate end-to-end transaction
-and sipgo refuses an ACK in `TransactionRequest`. A non-2xx ACK matching a
-live INVITE server transaction is absorbed by sipgo's transaction layer. An
-ACK that cannot be routed is dropped with no response. An ACK body is only
+and sipgo refuses an ACK in `TransactionRequest`. An ACK whose top Via
+matches a live INVITE server transaction (every non-2xx ACK, which reuses the
+INVITE branch, and the 2xx ACK of a client that reuses it too) goes to
+sipgo's transaction, never to the ACK handler. `guard` therefore starts
+`drainAcks` (`edge.go`) for every INVITE: it reads `tx.Acks()` until the
+transaction ends, so sipgo parks no goroutine and logs no `ACK missed`. After
+a non-2xx final the ACK is absorbed (Debug log; the edge's own client
+transaction ACKs the far end's hop), after a 2xx it runs through
+`guard(onAck)` like any ACK. An ACK that cannot be routed is dropped with no
+response. An ACK body is only
 ever the answer to an owed offer (§7.9a): `takeOwed` matches the answerer's
 plane and the INVITE's CSeq, and the body is rebuilt for the far end and kept
 (`lastAck`, `dialog.go:301`) so a retransmitted ACK for the same CSeq, sent
@@ -3183,6 +3190,9 @@ spin.
 - **A pre-answer INVITE handler holds one goroutine, a dialog record and a
   media session** until a final response, a CANCEL or the 5-minute backstop
   (`inviteTimeout`, `invite.go:24`).
+- **Each INVITE leaves one ACK drainer goroutine** (`drainAcks`, `edge.go`)
+  that outlives the handler and ends when sipgo's server transaction does
+  (Timer L, H or I, 32 s at most).
 - **Carrier DNS never blocks a request.** Lookups run in the refresh
   goroutine under a 3 s per-query timeout; handlers read the published
   snapshot.

@@ -10,6 +10,7 @@
 services:
   freeswitch:
     image: load-freeswitch
+    container_name: freeswitch   # collect.sh and the README use docker exec freeswitch
     build:
       context: .
       dockerfile: Dockerfile.freeswitch
@@ -20,6 +21,7 @@ services:
     ulimits: { nofile: { soft: 1048576, hard: 1048576 } }
   asterisk:
     image: load-asterisk
+    container_name: asterisk
     build:
       context: .
       dockerfile: Dockerfile.asterisk

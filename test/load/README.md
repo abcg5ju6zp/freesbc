@@ -489,7 +489,7 @@ from S2 and as much from S1. Hard limits in the code:
 `SBC_RTP=10000-59999` gives 25000 pairs per side; the binding table holds
 20000 registrations, 10 per AoR (`internal/edge/location.go`); one public IP
 that is not a carrier source may have 64 calls ringing at once
-(`maxEarlyPerSource`).
+(`maxEarlyPerSource`). Since v0.2.0, `shield.max_sessions` caps calls globally and defaults to the `rtp` capacity (25000 here; a T2/T4 SIPp call holds two), and `shield.invite_rate_limit` is off by default; a refusal by either is a 503 counted in `freesbc_edge_invite_rejects_total{reason}`, which `collect.sh` records.
 
 ## 9. Findings from the lab runs
 
@@ -541,6 +541,7 @@ switch/                docker-compose.yml, Dockerfiles, install scripts, collect
 sipp/scenarios/        carrier_uac, uas, client_reg, client_unreg, client_uac, options
 sipp/run.sh            test cases and ramps; rtp_report.sh
 lab/                   netns.sh (topology), smoke.sh (end-to-end), env.lab.{direct,nat}
+agents/                one prompt per host (s1/s2/s3.md) for running all of this with a coding agent on each server
 ```
 
 Numbering (both switches): DIDs `80…` echo, `81…` hairpin to the carrier,

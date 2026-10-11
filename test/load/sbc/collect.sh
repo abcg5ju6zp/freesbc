@@ -35,6 +35,7 @@ metrics_keys=(
   'freesbc_edge_admission_drops_total{reason="register_enumeration"}'
   freesbc_media_port_allocation_failure_total freesbc_sip_handler_panics_total
   freesbc_rtp_packets_rx_total freesbc_rtp_packets_tx_total
+  freesbc_edge_sessions 'freesbc_edge_invite_rejects_total' freesbc_sip_parse_failures_total
   go_goroutines go_memstats_heap_inuse_bytes
 )
 # A key without labels sums every series of that name (requests over methods).

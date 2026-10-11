@@ -98,7 +98,7 @@ if (( single_ip )); then
 fi
 cp "$here/sbc/shield-load.yaml" "$here/sbc/shield-default.yaml" "$out/sbc/"
 cp "$here/sbc/activate.sh" "$here/sbc/collect.sh" "$here/sbc/sbc_latency.py" \
-   "$here/sbc/99-freesbc-load.conf" "$here/sbc/freesbc.service" "$out/sbc/"
+   "$here/sbc/99-freesbc-load.conf" "$here/sbc/freesbc-load.conf" "$out/sbc/"
 printf 'SBC_ADMIN=%s\nSBC_ADMIN_PASSWORD=%q\nSBC_PUBLIC_BIND=%s\nSBC_PRIVATE_IP=%s\n' \
   "$SBC_ADMIN" "$SBC_ADMIN_PASSWORD" "$SBC_PUBLIC_BIND" "$SBC_PRIVATE_IP" >"$out/sbc/sbc.env"
 

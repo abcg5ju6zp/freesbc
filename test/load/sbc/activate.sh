@@ -19,7 +19,9 @@ bin=${FREESBC_BIN:-/usr/local/bin/freesbc}
 tmp=$(mktemp "$(dirname "$dst")/.freesbc.XXXXXX")
 cat "$base" "$shield" >"$tmp"
 "$bin" check -c "$tmp"
-chmod 0640 "$tmp"; chown --reference="$dst" "$tmp" 2>/dev/null || true
+# The shipped unit runs as freesbc with a read-only filesystem: root:freesbc 0640.
+chmod 0640 "$tmp"
+if getent group freesbc >/dev/null; then chown root:freesbc "$tmp"; else chown --reference="$dst" "$tmp" 2>/dev/null || true; fi
 
 restart=1
 if [[ -f $dst ]] && diff -q <(sed '/^shield:/,$d' "$dst") <(sed '/^shield:/,$d' "$tmp") >/dev/null; then

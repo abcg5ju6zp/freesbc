@@ -15,7 +15,7 @@
 #   t6-rate       OPTIONS above shield.rate_limit: expect drops     (CPS, T6_SECS)
 #   t6-scanner    OPTIONS with a scanner User-Agent: expect drops
 #   t6-ringcap    100 calls held ringing from one IP: expect 64 + 36 x 503
-#   t6-garbage    COUNT [2000] malformed datagrams: shows they bypass the shield
+#   t6-garbage    COUNT [2000] malformed datagrams: must be rate-limited before parsing (#133)
 #   ramp          run CASE at each of STEPS concurrent calls        (CASE, STEPS, HOLD, STEP_SECS)
 #
 # Variables (defaults in brackets):
@@ -148,7 +148,7 @@ for i in range(n):
     if i % 100 == 99: time.sleep(0.01)
 PY
   note "sent ${COUNT:-2000} malformed datagrams from :5096"
-  note "expect: no response; freesbc_shield_drops_total unchanged (the parser runs before the shield); S2 logs one ERROR \"failed to parse\" line carrying the raw datagram per message" ;;
+  note "expect (v0.2.0+): no response; freesbc_shield_drops_total{reason=\"rate\"} takes all but the burst, freesbc_sip_parse_failures_total the rest; no payload in S2's log (before v0.2.0: no shield drop and one ERROR line with the raw datagram each, #133)" ;;
 ramp)
   inner=${CASE:?ramp needs CASE=t1|t2|t3|t4}
   for step in ${STEPS:?ramp needs STEPS=\"100 250 500 ...\"}; do

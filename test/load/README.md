@@ -17,11 +17,16 @@ harness runs in a cloud, in an IDC, or in a single-host lab.
           internet / WAN                      │                         private LAN, no route out
 ```
 
+This is the multi-host, real-switch counterpart of `test/perf/` (one host,
+Docker, SIPp standing in for the switch so FreeSBC is the only thing under
+test). Use `test/perf` for FreeSBC's own ceiling; use this for the deployed
+stack.
+
 Status of this harness, so nothing is taken on trust:
 
 | Item | State |
 |---|---|
-| SIPp scenarios, render, run/collect/latency scripts | **Run end to end** in the namespace lab (`lab/smoke.sh`) through the real FreeSBC binary and Asterisk 20.6, in both the direct and the 1:1 NAT topology. Every case passes and every gauge returns to zero. |
+| SIPp scenarios, render, run/collect/latency scripts | **Run end to end** in the namespace lab (`lab/smoke.sh`) through the FreeSBC v0.2.0 release binary and Asterisk 20.6, in both the direct and the 1:1 NAT topology. Every case passes and every gauge returns to zero. |
 | Asterisk config | **Run** (same lab). |
 | FreeSWITCH config | **Not run.** Written against FreeSWITCH 1.10's stock `conf/vanilla`; `install-freeswitch.sh` was applied to that tree and the result parses, but no FreeSWITCH process has loaded it. Phase 1 (§5.1) checks it first. |
 | Capacity numbers | **None yet.** Every number in §8 is arithmetic for sizing, not a measurement. |
@@ -185,7 +190,7 @@ nothing for it. It also moves the ephemeral port range above the RTP range.
 ### 3.3 Limits and time
 
 - File descriptors: four UDP sockets per anchored call (RTP+RTCP on each
-  side). The unit sets `LimitNOFILE=1048576`; Go raises the soft limit to it.
+  side). The drop-in `freesbc-load.conf` sets `LimitNOFILE=1048576`; Go raises the soft limit to it.
 - Clocks: chrony on all three hosts; the latency tool compares two captures
   from one host (no skew), but cross-host log correlation needs synced clocks.
 
@@ -214,18 +219,29 @@ restart-only key.
 ### 4.2 S2: FreeSBC
 
 ```sh
-# build (Go version per go.mod) or take a release tarball
-go build -ldflags "-X main.version=$(git describe --always)" -o freesbc ./cmd/freesbc
+# release binary (v0.2.0 or later); the linux archive also ships freesbc.service
+v=v0.2.0
+curl -LO https://github.com/rasonyang/freesbc/releases/download/$v/freesbc_${v}_linux_amd64.tar.gz
+curl -LO https://github.com/rasonyang/freesbc/releases/download/$v/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS && tar -xzf freesbc_${v}_linux_amd64.tar.gz
+cd freesbc_${v}_linux_amd64
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin freesbc
 sudo install -m 0755 freesbc /usr/local/bin/freesbc
-sudo useradd --system --no-create-home freesbc
-sudo install -d -o freesbc -g freesbc -m 0750 /etc/freesbc
+sudo install -m 0644 freesbc.service /etc/systemd/system/freesbc.service
+cd -
+sudo install -D -m 0644 out/sbc/freesbc-load.conf /etc/systemd/system/freesbc.service.d/load.conf
+sudo systemctl daemon-reload
+sudo install -d -m 0750 -o root -g freesbc /etc/freesbc
 sudo cp out/sbc/99-freesbc-load.conf /etc/sysctl.d/ && sudo sysctl --system
-sudo cp out/sbc/freesbc.service /etc/systemd/system/ && sudo systemctl daemon-reload
-sudo touch /etc/freesbc/freesbc.yaml && sudo chown freesbc:freesbc /etc/freesbc/freesbc.yaml
-cd out/sbc && sudo ./activate.sh freeswitch load   # check + install + (re)start
+cd out/sbc && sudo ./activate.sh freeswitch load   # check + install root:freesbc 0640 + (re)start
 sudo systemctl enable freesbc
 journalctl -u freesbc -f                           # "edge proxy listening ... carrier_sources=..."
 ```
+
+The drop-in raises `LimitNOFILE` (the shipped unit has 65536) and lifts
+journald's rate limit (§9.5). The shipped unit mounts the filesystem
+read-only for FreeSBC, so the admin API's `PUT /api/config` cannot write the
+file; change the config with `activate.sh`.
 
 `activate.sh <base> <shield>` composes `base-<switch>.yaml` and
 `shield-<profile>.yaml`, runs `freesbc check`, installs atomically, and
@@ -290,8 +306,7 @@ sudo ABUSE=1 FREESBC=$PWD/freesbc SIPP=/usr/local/bin/sipp test/load/lab/smoke.s
 
 Brings up S1/S2/S3 as network namespaces (`lab/netns.sh`, `direct` or `nat`),
 runs T1–T4 with registration and removal, and checks that calls, dialogs,
-media sessions, ports and registrations all return to zero. Output from this
-repo's run:
+media sessions, ports and registrations all return to zero. Output with FreeSBC v0.2.0:
 
 ```text
 PASS t1 CC=10 HOLD=5 SECS=10 ...   ok=20
@@ -304,9 +319,9 @@ PASS unreg-a / unreg-b             ok=50
      t1 rtp: streams=14 packets=2107 lost=0 (0.0000%) ...
 T6   t6-admission                ok=0    failed=20   admission+80 rate+0 scanner+0
 T6   t6-ringcap                  ok=64   failed=36   admission+0 rate+0 scanner+0
-T6   t6-rate CPS=100 T6_SECS=5   ok=149  failed=351  admission+0 rate+1111 scanner+0
+T6   t6-rate CPS=100 T6_SECS=5   ok=149  failed=351  admission+0 rate+1163 scanner+0
 T6   t6-scanner                  ok=0    failed=5    admission+0 rate+0 scanner+1
-T6   t6-garbage                  ok=-    failed=-    admission+0 rate+0 scanner+0
+T6   t6-garbage                  ok=-    failed=-    admission+0 rate+1968 scanner+0
 PASS freesbc_active_calls=0 ... freesbc_active_registrations=0
 ```
 
@@ -328,7 +343,7 @@ errors, final screen, optional RTP capture + report).
 | T6b rate limit (shield `default`) | `activate.sh <sw> default`, then `./run.sh t6-rate CPS=100 T6_SECS=5` | ≈20 answered/s plus the burst (lab: 149 of 500); `shield_drops{rate}` rises |
 | T6c scanner (shield `default`) | `./run.sh t6-scanner` | 5 timeouts; `shield_drops{scanner}` +1 (see §9.3) |
 | T6d ringing cap (shield `load`, so the rate limit does not interfere) | `./run.sh reg-a`, `./run.sh t6-ringcap` | exactly 64 answered, 36 × 503 (lab: 64/36) |
-| T6e malformed (shield `default`) | `./run.sh t6-garbage COUNT=2000` | no response, no shield counter moves; documents §9.2 |
+| T6e malformed (shield `default`) | `./run.sh t6-garbage COUNT=2000` | v0.2.0+: no response; `shield_drops{rate}` takes all but the burst; `sip_parse_failures_total` counts the rest; no payload in the log (§9.2) |
 | T7 soak | T1 and T4 together at 70 % of the knee for 24 h (two S1 shells) | §7.1 throughout; RSS and goroutines flat |
 | T8 resilience | see §5.2 | stated per item |
 
@@ -486,14 +501,15 @@ FACT unless marked; each was observed with the harness above.
    `RcvbufErrors`. §3.2 covers it for the test; production deployments need
    the same sysctl, or FreeSBC could size the buffer of its SIP sockets. (The
    effect of the raised default was not measurable in the lab sandbox.)
-2. **Malformed SIP bypasses the shield and is logged in full.** The read
-   filter only checks bans; the per-IP rate limit runs after parsing. Each
-   unparsable datagram produces an `ERROR "failed to parse"` line from sipgo
-   with the raw message (`t6-garbage`: every delivered datagram, 572 of 572,
-   became one ERROR line of ~1.3 KB; `shield_drops_total` did not move). That
-   is a log-amplification path for an
-   anonymous sender and it copies request contents (including any
-   `Authorization` header) into the log.
+2. **Malformed SIP bypassed the shield and was logged in full: fixed in
+   v0.2.0** (#133, `3555aee`). Before the fix, every unparsable datagram
+   produced an `ERROR "failed to parse"` line carrying the raw message and
+   cost no rate token (572 of 572 delivered datagrams logged, `shield_drops`
+   unchanged). With v0.2.0 the token is charged in the read filter, before
+   parsing, payloads are never logged (one WARN per source and minute with
+   the length), and `freesbc_sip_parse_failures_total{transport}` counts
+   them: the same `t6-garbage` run now shows `rate` +1968 of 2000 and no
+   payload in the log.
 3. **Drops of a banned UDP socket are not counted.** After a scanner verdict
    bans a socket, its later datagrams are discarded in the read filter
    (`BannedFrom` "counts nothing"), so `shield_drops_total{reason="banned"}`
@@ -507,7 +523,7 @@ FACT unless marked; each was observed with the harness above.
    `client_unreg.xml` uses `Contact: *`.
 5. **Two Info log lines per call, no level flag.** At 500 CPS that is ~1000
    lines/s; journald's default rate limit would drop them above ~160 CPS, so
-   the unit sets `LogRateLimitIntervalSec=0`. Log volume is part of the cost
+   the drop-in sets `LogRateLimitIntervalSec=0`. Log volume is part of the cost
    being measured.
 6. **`freesbc_rtp_packets_*` update at call end**, not continuously, so
    during long holds the per-interval RTP rate in `collect.sh` lags; use the
@@ -518,7 +534,7 @@ FACT unless marked; each was observed with the harness above.
 ```text
 env.example            every address, port, count and password (copy to env)
 render.sh              env -> out/{sbc,switch,sipp}
-sbc/                   activate.sh, collect.sh, sbc_latency.py, shield profiles, sysctl, systemd unit
+sbc/                   activate.sh, collect.sh, sbc_latency.py, shield profiles, sysctl, systemd drop-in
 switch/asterisk/       pjsip, dialplan, rtp, minimal module/log config
 switch/freeswitch/     profiles, gateway, dialplan, ACL, vars (applied by install-freeswitch.sh)
 switch/                docker-compose.yml, Dockerfiles, install scripts, collect.sh

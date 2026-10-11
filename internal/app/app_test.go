@@ -46,10 +46,10 @@ func setPrivate(t *testing.T, port int) {
 // TestCheckExamples is the guard on the shipped example: it must keep
 // loading and validating exactly as `freesbc check` runs it.
 func TestCheckExamples(t *testing.T) {
-	if err := Check(filepath.Join("..", "..", "freesbc.example.yaml")); err != nil {
+	if _, err := Check(filepath.Join("..", "..", "freesbc.example.yaml")); err != nil {
 		t.Errorf("Check(freesbc.example.yaml): %v", err)
 	}
-	if err := Check(filepath.Join(t.TempDir(), "absent.yaml")); err == nil {
+	if _, err := Check(filepath.Join(t.TempDir(), "absent.yaml")); err == nil {
 		t.Error("Check on a missing file must fail")
 	}
 }
@@ -192,4 +192,29 @@ func freeUDPPort(t *testing.T) int {
 	port := c.LocalAddr().(*net.UDPAddr).Port
 	_ = c.Close()
 	return port
+}
+
+// check hands back the NAT checklist for a public.bind != public.ip config
+// and nothing otherwise.
+func TestCheckNATNote(t *testing.T) {
+	write := func(extra string) string {
+		p := filepath.Join(t.TempDir(), "c.yaml")
+		src := "public: { ip: 203.0.113.7" + extra + " }\nprivate: { ip: 10.77.0.2 }\nedge:\n  switch: [10.77.0.10:5060]\n  listen: { udp: 5060 }\n"
+		if err := os.WriteFile(p, []byte(src), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	note, err := Check(write(", bind: 172.20.0.4"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range []string{"NAT mode: advertised public endpoint = 203.0.113.7", "REQUIRED forwards -> 172.20.0.4", "udp/5060", "(rtp)"} {
+		if !strings.Contains(note, w) {
+			t.Errorf("note lacks %q:\n%s", w, note)
+		}
+	}
+	if note, err := Check(write("")); err != nil || note != "" {
+		t.Errorf("non-NAT Check = %q, %v; want empty note", note, err)
+	}
 }

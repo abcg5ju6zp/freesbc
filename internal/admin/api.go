@@ -37,6 +37,14 @@ func reloadResponse(st config.ReloadStatus) reloadBody {
 	return b
 }
 
+// Listener is one bound SIP socket and the address advertised for it.
+type Listener struct {
+	Transport  string `json:"transport"`
+	Bind       string `json:"bind"`
+	Advertised string `json:"advertised"`
+	Private    bool   `json:"private"`
+}
+
 // handleStatus reports process/service-level status: version, uptime, active
 // call count, media port usage, and the SIP listeners the running planes
 // bound (not the hot-reloaded config's, which may name sockets nothing is
@@ -46,6 +54,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	listeners := []string{}
 	if s.deps.Listeners != nil {
 		listeners = append(listeners, s.deps.Listeners()...)
+	}
+	details := []Listener{}
+	if s.deps.ListenerInfos != nil {
+		details = append(details, s.deps.ListenerInfos()...)
 	}
 	var rs config.ReloadStatus
 	if s.deps.Reload != nil {
@@ -57,6 +69,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"active_calls":   s.deps.ActiveCalls(),
 		"ports":          map[string]int{"in_use": inUse, "total": total},
 		"listeners":      listeners,
+		"listener_info":  details,
 		"reload":         reloadResponse(rs),
 	})
 }

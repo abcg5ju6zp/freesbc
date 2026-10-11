@@ -15,7 +15,7 @@ FreeSBC is a stateful SIP and media edge proxy. It provides SIP registration pro
                       Switch (FreeSWITCH / Asterisk)
 ```
 
-- **Public side**: SIP over UDP, TCP, TLS, WS and WSS on `public.bind`; RTP, optionally SDES-SRTP; WebRTC (ICE-Lite + DTLS-SRTP). Everything FreeSBC advertises there uses `public.ip`.
+- **Public side**: SIP over UDP, TCP, TLS, WS and WSS on `public.bind`; RTP, optionally SDES-SRTP; WebRTC (ICE-Lite + DTLS-SRTP). Everything FreeSBC advertises there uses `public.ip`. Behind 1:1 NAT (`public.bind` != `public.ip`) the router must forward every `edge.listen` port and the `rtp` range to `public.bind` with the same port numbers; `freesbc check`, `init` and `run` print that list (docs/config.md, "1:1 NAT checklist"). A forgotten port shows as calls that end at 32 s with `ACK missed`.
 - **Private side**: one fixed UDP socket, `private.ip:5060`, for all SIP to and from the switch, plus plain RTP/RTCP.
 - **All signaling and media stay anchored through FreeSBC.** In SDP, Contact and the Request-URI, the switch is never given a public client's address and a public client is never given the switch's. On client calls the Via stack is ordinary proxy behaviour: FreeSBC prepends its own Via and annotates the sender's with `received=`, so the switch does see the client's address there. On carrier legs nothing private crosses to the carrier (see [Carrier path](#carrier-path)).
 

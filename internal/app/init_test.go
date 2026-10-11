@@ -264,3 +264,25 @@ func TestInitAdminPasswordMismatch(t *testing.T) {
 		t.Error("file written despite error")
 	}
 }
+
+// Init prints the NAT checklist after the hint when public.ip differs from
+// public.bind, and nothing extra otherwise.
+func TestInitPrintsNATChecklist(t *testing.T) {
+	for _, tc := range []struct {
+		name, route string
+		want        bool
+	}{{"nat", "172.31.5.10", true}, {"direct", "203.0.113.7", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			o, _ := fakeInit(t, "10.0.0.2", tc.route, "203.0.113.7")
+			o.Switch = "10.77.0.10"
+			var out strings.Builder
+			o.Out = &out
+			if err := Init(context.Background(), o); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(out.String(), "REQUIRED forwards -> 172.31.5.10"); got != tc.want {
+				t.Errorf("checklist present = %v, want %v:\n%s", got, tc.want, out.String())
+			}
+		})
+	}
+}

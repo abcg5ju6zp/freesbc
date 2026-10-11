@@ -221,7 +221,8 @@ func Init(ctx context.Context, o InitOptions) error {
 	}
 
 	data := renderInitConfig(pub, bind, priv, sw, port, hash)
-	if _, err := config.Parse(data); err != nil {
+	parsed, err := config.Parse(data)
+	if err != nil {
 		return fmt.Errorf("init: generated config is invalid, nothing written: %w", err)
 	}
 	f, err := os.OpenFile(o.Path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -242,6 +243,7 @@ func Init(ctx context.Context, o InitOptions) error {
 	}
 	fmt.Fprintf(o.Out, "wrote %s\nnext: freesbc check -c %s, then freesbc run -c %s\nThe switch side (accepting traffic from %s) is described in docs/edge.md.\n",
 		o.Path, o.Path, o.Path, priv)
+	fmt.Fprint(o.Out, parsed.NATChecklist())
 	return nil
 }
 

@@ -31,6 +31,9 @@ type Metrics struct {
 	subscriptions       atomic.Int64 // gauge
 	registrationTotal   atomic.Uint64
 	registrationFailure atomic.Uint64
+	// registerAuthFailures counts failed REGISTER credential attempts
+	// struck against their source (regguard.go).
+	registerAuthFailures atomic.Uint64
 
 	dialogs        atomic.Int64 // gauge
 	sessions       atomic.Int64 // gauge: calls holding a session slot
@@ -154,8 +157,12 @@ func (m *Metrics) ResponseOut(code int) {
 	bump(&m.responsesOut, strconv.Itoa(code/100)+"xx")
 }
 
-func (m *Metrics) Registered()            { m.registrationTotal.Add(1) }
-func (m *Metrics) RegistrationFailed()    { m.registrationFailure.Add(1) }
+func (m *Metrics) Registered()         { m.registrationTotal.Add(1) }
+func (m *Metrics) RegistrationFailed() { m.registrationFailure.Add(1) }
+
+// RegisterAuthFailed counts one failed REGISTER credential attempt struck
+// against its source.
+func (m *Metrics) RegisterAuthFailed()    { m.registerAuthFailures.Add(1) }
 func (m *Metrics) SetRegistrations(n int) { m.registrations.Store(int64(n)) }
 
 // SetSubscriptions publishes the live subscription record count.
@@ -329,6 +336,9 @@ type Snapshot struct {
 
 	RegistrationTotal   uint64
 	RegistrationFailure uint64
+	// RegisterAuthFailures is the failed REGISTER credential attempts
+	// struck against their source (shield.register_ban).
+	RegisterAuthFailures uint64
 
 	RequestsIn   map[string]uint64
 	ResponsesOut map[string]uint64
@@ -388,6 +398,7 @@ func (m *Metrics) Snapshot() Snapshot {
 		Draining:             m.draining.Load() == 1,
 		RegistrationTotal:    m.registrationTotal.Load(),
 		RegistrationFailure:  m.registrationFailure.Load(),
+		RegisterAuthFailures: m.registerAuthFailures.Load(),
 		RequestsIn:           map[string]uint64{},
 		ResponsesOut:         map[string]uint64{},
 		RTPPacketsRx:         rtp.RTPPacketsRx,

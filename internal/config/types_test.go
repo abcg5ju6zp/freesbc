@@ -66,3 +66,24 @@ func TestParseRateLimit(t *testing.T) {
 		}
 	}
 }
+
+func TestParseStrikeLimit(t *testing.T) {
+	sl, err := ParseStrikeLimit("10/10m")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if sl.N != 10 || sl.Window != 10*time.Minute || sl.Off {
+		t.Errorf("got %+v", sl)
+	}
+	if sl, err := ParseStrikeLimit("off"); err != nil || !sl.Off {
+		t.Errorf("off: got %+v, %v", sl, err)
+	}
+	if _, err := ParseStrikeLimit(DefaultRegisterBan); err != nil {
+		t.Errorf("default %q: %v", DefaultRegisterBan, err)
+	}
+	for _, bad := range []string{"", "10", "0/10m", "-1/10m", "10/0s", "10/500ms", "10/25h", "10/m", "x/10m", "100001/1m", "OFF"} {
+		if _, err := ParseStrikeLimit(bad); err == nil {
+			t.Errorf("expected error for %q", bad)
+		}
+	}
+}

@@ -34,9 +34,18 @@ type CarrierRegistration struct {
 type Ban struct {
 	Source string // IP, or IP:port for a UDP socket ban
 	Kind   string // "ip" or "udp_socket"
-	Reason string // "scanner"
+	Reason string // "scanner" or "register"
 	Since  time.Time
 	Until  time.Time
+}
+
+// Offender is one source with shield strikes in an open window.
+type Offender struct {
+	Source  string // IPv4 address, or IPv6 /64 prefix
+	Reason  string // "register"
+	Strikes int
+	Since   time.Time // the window opened
+	Until   time.Time // the window closes
 }
 
 // SwitchNode is the passive health of one switch node.
@@ -205,6 +214,32 @@ func (s *Server) handleBans(w http.ResponseWriter, r *http.Request) {
 		"items": items, "total": total, "limit": limit, "offset": offset,
 		"ban_adds_rejected": rejected,
 	})
+}
+
+// handleOffenders serves GET /api/shield/offenders?limit=: the sources with
+// strikes in an open window, most strikes first (at most limit, default
+// 100, at most 1000), and the total.
+func (s *Server) handleOffenders(w http.ResponseWriter, r *http.Request) {
+	if !stateGET(w, r, s.deps.Offenders != nil) {
+		return
+	}
+	limit, _, ok := pageParams(w, r)
+	if !ok {
+		return
+	}
+	top, total := s.deps.Offenders(limit)
+	now := time.Now()
+	items := make([]map[string]any, 0, len(top))
+	for _, o := range top {
+		items = append(items, map[string]any{
+			"source":    o.Source,
+			"reason":    o.Reason,
+			"strikes":   o.Strikes,
+			"since":     rfc3339(o.Since),
+			"remaining": secondsUntil(o.Until, now),
+		})
+	}
+	writeJSON(w, map[string]any{"items": items, "total": total, "limit": limit})
 }
 
 // handleSwitchNodes serves GET /api/switch-nodes: always an array.

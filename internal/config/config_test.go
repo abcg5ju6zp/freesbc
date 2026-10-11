@@ -220,6 +220,9 @@ func TestValidateErrors(t *testing.T) {
 		{"invite rate junk", with("shield: { invite_rate_limit: nope }\n"), "shield.invite_rate_limit"},
 		{"invite rate zero", with("shield: { invite_rate_limit: 0/s }\n"), "shield.invite_rate_limit"},
 		{"invite rate per_ip", with("shield: { invite_rate_limit: 5/s per_ip }\n"), "per_ip is not allowed"},
+		{"register ban junk", with("shield: { register_ban: nope }\n"), "shield.register_ban"},
+		{"register ban zero", with("shield: { register_ban: 0/10m }\n"), "shield.register_ban"},
+		{"register ban long window", with("shield: { register_ban: 10/48h }\n"), "shield.register_ban"},
 		{"admin listen", with("admin: { listen: nope, password_hash: " + good + " }\n"), "admin.listen"},
 		{"admin remote without opt-in", with("admin: { listen: 0.0.0.0:8080, password_hash: " + good + " }\n"), "allow_remote"},
 		{"admin no hash", with("admin: { listen: 127.0.0.1:8080 }\n"), "admin.password_hash"},
@@ -438,6 +441,20 @@ func TestShieldSessionLimits(t *testing.T) {
 	}
 	if c := mustParse(t, with("shield: { max_sessions: 3 }\n")); c.Shield.MaxSessions != 3 {
 		t.Errorf("max_sessions = %d, want 3", c.Shield.MaxSessions)
+	}
+}
+
+// shield.register_ban defaults to DefaultRegisterBan, takes an explicit
+// threshold and accepts "off".
+func TestShieldRegisterBan(t *testing.T) {
+	if c := mustParse(t, with("")); c.Shield.RegisterBan != DefaultRegisterBan {
+		t.Errorf("register_ban default = %q, want %q", c.Shield.RegisterBan, DefaultRegisterBan)
+	}
+	if c := mustParse(t, with("shield: { register_ban: 5/1m }\n")); c.Shield.RegisterBan != "5/1m" {
+		t.Errorf("register_ban = %q, want 5/1m", c.Shield.RegisterBan)
+	}
+	if c := mustParse(t, with("shield: { register_ban: \"off\" }\n")); c.Shield.RegisterBan != "off" {
+		t.Errorf("register_ban = %q, want off", c.Shield.RegisterBan)
 	}
 }
 

@@ -25,6 +25,10 @@ func stateDeps() Deps {
 		return []Ban{{Source: "203.0.113.50", Kind: "ip", Reason: "scanner",
 			Since: now.Add(-time.Minute), Until: now.Add(90 * time.Second)}}, 3, 5
 	}
+	d.Offenders = func(limit int) ([]Offender, int) {
+		return []Offender{{Source: "198.51.100.77", Reason: "register", Strikes: 9,
+			Since: now.Add(-time.Minute), Until: now.Add(9 * time.Minute)}}, 4
+	}
 	d.SwitchNodes = func() []SwitchNode {
 		return []SwitchNode{
 			{Address: "10.0.0.5:5060", State: "cooling_down", CooldownRemaining: 20 * time.Second, LastFailure: now.Add(-10 * time.Second)},
@@ -45,6 +49,7 @@ func stateEmptyDeps() Deps {
 	d.Registrations = func(string, int, int) ([]Registration, int) { return nil, 0 }
 	d.CarrierRegistrations = func() []CarrierRegistration { return nil }
 	d.Bans = func(int, int) ([]Ban, int, int64) { return nil, 0, 0 }
+	d.Offenders = func(int) ([]Offender, int) { return nil, 0 }
 	d.SwitchNodes = func() []SwitchNode { return nil }
 	d.Carriers = func() []Carrier { return nil }
 	return d
@@ -52,7 +57,7 @@ func stateEmptyDeps() Deps {
 
 var statePaths = []string{
 	"/api/registrations", "/api/carrier-registrations", "/api/shield/bans",
-	"/api/switch-nodes", "/api/carriers",
+	"/api/shield/offenders", "/api/switch-nodes", "/api/carriers",
 }
 
 func TestStateEndpointsRequireAuth(t *testing.T) {
@@ -73,6 +78,7 @@ func TestStateEndpointsEmpty(t *testing.T) {
 		{"/api/registrations", `{"items":[],"limit":100,"offset":0,"total":0}`},
 		{"/api/carrier-registrations", `[]`},
 		{"/api/shield/bans", `{"ban_adds_rejected":0,"items":[],"limit":100,"offset":0,"total":0}`},
+		{"/api/shield/offenders", `{"items":[],"limit":100,"total":0}`},
 		{"/api/switch-nodes", `[]`},
 		{"/api/carriers", `[]`},
 	}
@@ -120,6 +126,13 @@ func TestStateEndpointsData(t *testing.T) {
 	}
 	if bans["total"] != float64(3) || bans["ban_adds_rejected"] != float64(5) {
 		t.Errorf("bans total/rejected = %v/%v, want 3/5", bans["total"], bans["ban_adds_rejected"])
+	}
+
+	offs := get("/api/shield/offenders").(map[string]any)
+	o := page(offs)
+	if o["source"] != "198.51.100.77" || o["reason"] != "register" || o["strikes"] != float64(9) ||
+		o["remaining"].(float64) < 538 || o["since"] == nil || offs["total"] != float64(4) {
+		t.Errorf("offenders = %v", offs)
 	}
 
 	nodes := get("/api/switch-nodes").([]any)
@@ -263,5 +276,31 @@ func TestUIStateTab(t *testing.T) {
 	i, j := strings.Index(js, "// ---- state tables"), strings.Index(js, "// ---- start ----")
 	if i < 0 || j < i || strings.Contains(js[i:j], "innerHTML") {
 		t.Error("state tables must build rows with textContent, not innerHTML")
+	}
+}
+
+// The offenders limit reaches the closure, clamped; a bad one is 400.
+func TestOffendersLimit(t *testing.T) {
+	got := -1
+	d := emptyDeps()
+	d.Offenders = func(limit int) ([]Offender, int) { got = limit; return nil, 0 }
+	h := newTestServer(t, d).handler()
+	for _, tc := range []struct {
+		path      string
+		code, lim int
+	}{
+		{"/api/shield/offenders", 200, 100},
+		{"/api/shield/offenders?limit=7", 200, 7},
+		{"/api/shield/offenders?limit=5000", 200, 1000},
+		{"/api/shield/offenders?limit=0", 400, -1},
+	} {
+		got = -1
+		rr := httptest.NewRecorder()
+		req := newReq("GET", tc.path, nil)
+		req.SetBasicAuth("admin", "secret")
+		h.ServeHTTP(rr, req)
+		if rr.Code != tc.code || got != tc.lim {
+			t.Errorf("GET %s = %d limit %d, want %d limit %d", tc.path, rr.Code, got, tc.code, tc.lim)
+		}
 	}
 }

@@ -34,6 +34,7 @@ type collector struct {
 	proxyWebRTC     *prometheus.Desc
 	proxyRegTotal   *prometheus.Desc
 	proxyRegFailure *prometheus.Desc
+	proxyRegAuth    *prometheus.Desc
 	proxyReqIn      *prometheus.Desc
 	proxyResOut     *prometheus.Desc
 	proxyRTPPktRx   *prometheus.Desc
@@ -88,6 +89,7 @@ func newCollector(deps Deps, audit *auditLog, health *healthTracker, tlsRec func
 		proxyWebRTC:     prometheus.NewDesc("freesbc_active_webrtc_sessions", "Anchored media sessions whose public leg is WebRTC.", nil, nil),
 		proxyRegTotal:   prometheus.NewDesc("freesbc_registration_total", "Registrations accepted by the upstream registrar through the proxy.", nil, nil),
 		proxyRegFailure: prometheus.NewDesc("freesbc_registration_failure_total", "Registrations that failed at or through the proxy.", nil, nil),
+		proxyRegAuth:    prometheus.NewDesc("freesbc_edge_register_auth_failures_total", "Failed REGISTER credential attempts struck against their source (shield.register_ban).", nil, nil),
 		// method and transport are bounded sets; a Call-ID label here would
 		// create a permanent series per call (spec §17).
 		proxyReqIn:      prometheus.NewDesc("freesbc_sip_requests_total", "SIP requests received by the edge proxy.", []string{"method", "transport"}, nil),
@@ -128,7 +130,7 @@ func (c *collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.healthSt
 	for _, d := range []*prometheus.Desc{
 		c.proxyRegs, c.proxySubs, c.proxyDialogs, c.proxySessions, c.proxyDraining, c.proxyMedia, c.proxyWebRTC,
-		c.proxyRegTotal, c.proxyRegFailure, c.proxyReqIn, c.proxyResOut,
+		c.proxyRegTotal, c.proxyRegFailure, c.proxyRegAuth, c.proxyReqIn, c.proxyResOut,
 		c.proxyRTPPktRx, c.proxyRTPPktTx, c.proxyRTPByteRx, c.proxyRTPByteTx,
 		c.proxyPortFail, c.proxyICEFail, c.proxyDTLSFail, c.proxyPanics,
 		c.proxyAdmission, c.proxyCallsEnded, c.proxyAckMissed, c.proxyRejects, c.proxyParseFail, c.proxyStreams, c.proxyStreamRef, c.proxyStreamCls, c.proxyCarrierReq, c.proxyCarrierReg,
@@ -190,6 +192,7 @@ func (c *collector) Collect(ch chan<- prometheus.Metric) {
 	g(c.proxyWebRTC, float64(p.ActiveWebRTCSessions))
 	counter(c.proxyRegTotal, float64(p.RegistrationTotal))
 	counter(c.proxyRegFailure, float64(p.RegistrationFailure))
+	counter(c.proxyRegAuth, float64(p.RegisterAuthFailures))
 	for k, v := range p.RequestsIn {
 		method, transport, _ := strings.Cut(k, "/")
 		counter(c.proxyReqIn, float64(v), method, transport)

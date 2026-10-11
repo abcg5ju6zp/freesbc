@@ -530,6 +530,10 @@ type fakeSwitch struct {
 	// gets instead of the challenge-then-200 exchange — a registrar that
 	// refuses the AoR outright.
 	registerStatus int
+	// authStatus, when non-zero, is the final status every REGISTER that
+	// carries Authorization gets: a registrar refusing the credential. A
+	// 401 carries a fresh challenge with the same nonce.
+	authStatus int
 	// answerSDP is what the switch answers an INVITE with; %d is its RTP
 	// port.
 	rtpPort int
@@ -853,7 +857,17 @@ func (f *fakeSwitch) onRegister(req *sip.Request, tx sip.ServerTransaction) {
 	f.mu.Lock()
 	challenge := f.challenge && req.GetHeader("Authorization") == nil
 	status := f.registerStatus
+	authStatus := f.authStatus
 	f.mu.Unlock()
+	if authStatus != 0 && req.GetHeader("Authorization") != nil {
+		res := sip.NewResponseFromRequest(req, authStatus, "", nil)
+		if authStatus == 401 {
+			res.AppendHeader(sip.NewHeader("WWW-Authenticate",
+				`Digest realm="example.com", nonce="abc123nonce", algorithm=MD5, qop="auth"`))
+		}
+		_ = tx.Respond(res)
+		return
+	}
 	if status != 0 {
 		_ = tx.Respond(sip.NewResponseFromRequest(req, status, "", nil))
 		return

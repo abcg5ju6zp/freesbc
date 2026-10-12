@@ -1501,8 +1501,10 @@ already has its own backstop (`armOwedTimer`, §7.9a), starts a timer of
 miss is noted once per transaction (`noteAckMiss`, `ackOwed.counted`) in
 three ways: the callee's BYE arrives while the ACK is still owed (the
 callee's own 64·T1 fires just before ours; RFC 3261 §15 allows no other BYE
-before the ACK), which is `ack_timeout` terminated by the callee and is
-checked before the relayed BYE's outcome, since a caller whose ACK is lost
+before the ACK) and the ACK is still missing after `byeAckGrace` (500 ms;
+the ACK and the BYE are independent flows that can cross, and an ACK that
+lands within the grace makes the BYE an ordinary `bye_*`), which is
+`ack_timeout` terminated by the callee and is checked before the relayed BYE's outcome, since a caller whose ACK is lost
 often misses the BYE too; the timer fires, which is `ack_timeout`
 terminated by the proxy followed by `byeBothEnds`; or `owedExpired` fires
 with the ACK also owed, which stays `answer_timeout` but is counted. A miss

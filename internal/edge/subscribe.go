@@ -476,6 +476,7 @@ func (s *Server) subscribeToClient(req *sip.Request, tx sip.ServerTransaction) {
 	}
 	// The Request-URI the switch used names FreeSBC's own contact for the
 	// client; the client must see one addressed to itself.
+	s.hideRoutesToClient(out, to, true)
 	out.Recipient = clientRequestURI(b)
 	fsip.SetContact(out, to.uri())
 	s.log.Debug("proxying SUBSCRIBE to client", "sip_call_id", fsip.CallID(req),
@@ -547,6 +548,12 @@ func (s *Server) relaySubscribe(req *sip.Request, tx sip.ServerTransaction, out 
 		}
 		if isSDPBody(res) {
 			stripBody(res)
+		}
+		switch {
+		case requester.plane == planePrivate && res.StatusCode/100 == 2:
+			s.addPrivateRecordRoute(res)
+		case requester.plane == planePublic:
+			s.hideRecordRoutesToClient(res)
 		}
 		if res.StatusCode/100 == 2 && !confirmed {
 			u, _ := fsip.ContactURI(res)

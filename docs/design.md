@@ -597,7 +597,7 @@ Every other out-of-dialog method gets 405 (table in §6.1). The send address of 
 
 ### 6.6 Topology hiding
 
-On a client call FreeSBC keeps every Via below its own and adds the double Record-Route, because both sides are its own to show (§7.8). On a carrier leg that would leak the switch, so `hide.go` applies a separate set of rules. A request toward a carrier is built by `prepareForwardHidden` (`hide.go:82`): `prepareForward` first, then `hideToCarrier` (`hide.go:164`).
+On a client call FreeSBC keeps every Via below its own (full header hiding on client legs is tracked in #167). Record-Route is hidden on every public leg, clients included (§7.8): the pair stays on the switch side and a public party sees only FreeSBC's public entry. On a carrier leg the rest of the switch's headers would leak too, so `hide.go` applies a separate set of rules. A request toward a carrier is built by `prepareForwardHidden` (`hide.go:82`): `prepareForward` first, then `hideToCarrier` (`hide.go:164`).
 
 **Request toward a carrier** (out-of-dialog REGISTER, INVITE, OPTIONS, and every in-dialog request of a carrier dialog that leaves on the public side):
 
@@ -616,6 +616,8 @@ On a client call FreeSBC keeps every Via below its own and adds the double Recor
 Max-Forwards is decremented as on any proxied request; a zero Max-Forwards is 483.
 
 **Response to the switch** (`respToSwitch`, `hideResponse`, `hide.go:186-202`): FreeSBC's public Via is popped (an empty Via list is allowed here, `popOwnVia`, `forward.go:173`); then the switch's original Vias are restored so its transaction matches; From and To addresses are restored to the originals (tags stay as answered), undoing the identity masking. The Contact is FreeSBC's private address (`invite_leg.go:161`). For an INVITE's 1xx/2xx, FreeSBC's private Record-Route is inserted right after the public one the carrier echoed, or at the end of the list if the carrier dropped it (`addPrivateRecordRoute`, `hide.go:229`; call site `invite_leg.go:162-164`). The switch, as UAC, reverses the list, so its route set starts at `private.ip:5060` and its in-dialog requests reach the private socket.
+
+**Client legs** (issue #166) follow the same Record-Route rule without the other rewrites. A switch-originated INVITE or SUBSCRIBE to a client carries FreeSBC's public Record-Route alone, and every Route the switch preloaded is removed (`hideRoutesToClient`, `hide.go:232`; call sites `invite.go:633`, `subscribe.go:479`). A response to a client-originated INVITE or SUBSCRIBE has every Record-Route that names the private socket, or a switch IP other than a FreeSBC public listener, removed, so FreeSBC's private entry (which the switch echoes) and any entry the switch adds never reach the client; the client's own proxies' entries stay (`hideRecordRoutesToClient`, `hide.go:244`; call sites `invite_leg.go:169`, `subscribe.go:556`). The client's response to a switch-originated INVITE or SUBSCRIBE gets FreeSBC's private Record-Route inserted as for a carrier (`addPrivateRecordRoute`, `hide.go:263`; call sites `invite_leg.go:166`, `subscribe.go:554`), so the switch's route set still starts at `private.ip:5060`. In-dialog routing needs nothing else: FreeSBC matches a dialog on Call-ID and both tags, `stripOwnRoutes` removes whichever of its own Routes a request carries, and the Request-URI is retargeted to the far Contact.
 
 **Carrier-originated request that goes to the switch** keeps the normal double Record-Route toward the switch (it is a private-side message; nothing is hidden from the switch). **The response to the carrier** (`respToCarrier`, `hide.go:203-220`) has any Record-Route naming the private socket removed and its Contact, if present, replaced by the public address, so no private address leaves in a response either.
 
@@ -1611,7 +1613,10 @@ implements RFC 3261 §16.6 in order:
 
 Record-Route is added on the initial INVITE in every call direction
 (public → switch, switch → client, switch → carrier) and **not** on
-REGISTER, ACK, BYE/INFO/NOTIFY or re-INVITE.
+REGISTER, ACK, BYE/INFO/NOTIFY or re-INVITE. The pair is a private-side
+message only: toward a public client `hideRoutesToClient` (and
+`hideRecordRoutesToClient` on the response) reduce it to FreeSBC's public
+entry (§6.6, issue #166).
 
 **Carrier legs.** A request that goes to a carrier takes the same steps and
 then `hideToCarrier` (`prepareForwardHidden`, `hide.go:82`): the switch's Vias,
@@ -1849,8 +1854,8 @@ the INVITE is answered **404**.
 **SUBSCRIBE** (RFC 6665, `onSubscribe`, `subscribe.go:379`) creates a dialog of
 its own, separate from any INVITE dialog: the SUBSCRIBE and the notifier's
 NOTIFYs share a Call-ID and a pair of tags, and the NOTIFYs arrive on the
-plane the SUBSCRIBE did not. FreeSBC stays on that path with the same double
-Record-Route as a call and keeps one record per subscription in `subTable`
+plane the SUBSCRIBE did not. FreeSBC stays on that path with the same
+Record-Route handling as a call (double toward the switch, public entry only toward a client) and keeps one record per subscription in `subTable`
 (`subscribe.go:96`), so a NOTIFY is routed only when it matches a subscription
 FreeSBC carried.
 
@@ -1864,8 +1869,9 @@ FreeSBC carried.
   Admission keys on the transport source alone, as for an INVITE (§7.5).
 - No `Event` header → **489**. The request goes to the switch node chosen by
   the hash-user pool over the From user (`selectUpstream(hashUserFor(req))`)
-  with `prepareForward` (Via, double Record-Route) and FreeSBC's private
-  Contact.
+  with `prepareForward` (Via, double Record-Route toward the switch) and
+  FreeSBC's private Contact; the 2xx to the subscriber has the private
+  Record-Route removed (§6.6).
 - A SUBSCRIBE from the switch with no To-tag (`subscribeToClient`,
   `subscribe.go:438`) is classified by Request-URI (§6.1): a client token is
   delivered to that client with the Request-URI restored to the client's own
@@ -3007,7 +3013,7 @@ sequenceDiagram
     FS->>Hc: INVITE sip:1001@private.ip:5060;fsbc=TOKEN (private socket)
     Note over Hc: arrival = private -> invitePrivate -> classifySwitchRequest = client; resolveTarget(token) -> Binding
     Hc->>Hc: buildPublicOffer (plain RTP at public.ip:publicPort for a UDP phone; a DTLS-SRTP offer, a=setup:actpass, for a ws/wss browser)
-    Hc->>P: INVITE sip:1001@ the binding.Source address (R-URI carries no token, Contact = public side, double Record-Route)
+    Hc->>P: INVITE sip:1001@ the binding.Source address (R-URI carries no token, Contact = public side, Record-Route = public only)
     P-->>Hc: 180 Ringing
     Hc-->>FS: 180
     P-->>Hc: 200 OK (SDP answer)
@@ -3968,7 +3974,9 @@ are never copied across legs. SDES keys are generated by FreeSBC with `crypto/ra
 
 **Topology hiding.** Toward clients it is structural: every SDP body is
 constructed, never derived, so the switch is never given a public endpoint's
-address and a public client is never given the switch's. Declined sections are
+address and a public client is never given the switch's; Record-Route and
+Route are hidden on client legs too (§6.6, issue #166), the other client-leg
+headers are #167. Declined sections are
 emitted with no attributes and no connection line. Toward carriers it is
 enforced on every carrier leg (`hide.go`, §6): the carrier sees only
 FreeSBC's public Via, Record-Route and Contact; every Via the switch added,

@@ -261,15 +261,16 @@ func TestStreamRegisterCallAndBye(t *testing.T) {
 			if res.StatusCode != 200 {
 				t.Fatalf("INVITE: %d", res.StatusCode)
 			}
-			// The public Record-Route (the one facing the caller is the
-			// bottom value) and the Contact name this leg's transport.
+			// The only Record-Route the caller sees is the public one (the
+			// private entry stays on the switch side, #166); it and the
+			// Contact name this leg's transport.
 			rrs := res.GetHeaders("Record-Route")
-			if len(rrs) < 2 {
-				t.Fatalf("Record-Route count = %d, want the double RR", len(rrs))
+			if len(rrs) != 1 {
+				t.Fatalf("Record-Route count = %d, want only the public entry", len(rrs))
 			}
-			bottom := rrs[len(rrs)-1].(*sip.RecordRouteHeader)
-			if v, _ := bottom.Address.UriParams.Get("transport"); v != tr {
-				t.Errorf("caller-facing Record-Route = %s, want transport=%s", bottom.Address.String(), tr)
+			only := rrs[0].(*sip.RecordRouteHeader)
+			if v, _ := only.Address.UriParams.Get("transport"); v != tr {
+				t.Errorf("caller-facing Record-Route = %s, want transport=%s", only.Address.String(), tr)
 			}
 			if c, ok := res.Contact(), res.Contact() != nil; !ok || c.Address.UriParams == nil {
 				t.Errorf("200 Contact = %v", c)

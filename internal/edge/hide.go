@@ -10,8 +10,10 @@ import (
 )
 
 // This file holds topology hiding on carrier legs (issue #96). On a client
-// call the proxy keeps every Via below its own and double Record-Routes,
-// because both sides are its own to show. A carrier is different: it is on
+// call the proxy keeps every Via below its own. Record-Route is hidden on
+// every public leg (issue #166): a client sees FreeSBC's public entry only
+// and the private one lives on the switch side alone. A carrier is also
+// different: it is on
 // the public internet and the switch behind FreeSBC is on a private LAN, so
 // nothing toward the carrier may name a private address.
 //
@@ -221,8 +223,40 @@ func (s *Server) hideResponse(res *sip.Response, orig *sip.Request, mode respHid
 	}
 }
 
-// addPrivateRecordRoute inserts FreeSBC's private Record-Route into a
-// carrier INVITE response bound for the switch, immediately after the
+// hideRoutesToClient is the Record-Route/Route rule for an out-of-dialog
+// request the switch sends to a public client (issue #166): the only
+// Record-Route the client sees is FreeSBC's public entry for the side it is
+// on, and no Route the switch preloaded survives (FreeSBC's own were
+// stripped as the request was prepared). The switch's own route set is
+// completed on the way back by addPrivateRecordRoute.
+func (s *Server) hideRoutesToClient(out *sip.Request, to side, recordRoute bool) {
+	fsip.RemoveHeaders(out, "Record-Route")
+	if recordRoute {
+		out.PrependHeader(to.recordRoute())
+	}
+	fsip.RemoveHeaders(out, "Route")
+}
+
+// hideRecordRoutesToClient removes every Record-Route naming the private
+// socket or a switch from a response going to a public client, so what the
+// switch echoed (FreeSBC's private entry) or added (its own) never reaches
+// it. Entries of other hops, such as the client's own proxies, stay.
+func (s *Server) hideRecordRoutesToClient(res *sip.Response) {
+	var keep []*sip.RecordRouteHeader
+	for _, h := range res.GetHeaders("Record-Route") {
+		if rr, ok := h.(*sip.RecordRouteHeader); ok && !s.isPrivateURI(rr.Address) && (s.isPublicURI(rr.Address) || !s.isSwitchHost(rr.Address.Host)) {
+			keep = append(keep, rr)
+		}
+	}
+	fsip.RemoveHeaders(res, "Record-Route")
+	for _, rr := range keep {
+		res.AppendHeader(rr)
+	}
+}
+
+// addPrivateRecordRoute inserts FreeSBC's private Record-Route into an
+// INVITE or SUBSCRIBE response bound for the switch (from a carrier or a
+// client: neither echoes it), immediately after the
 // public one the carrier echoed (or at the end of the list when the carrier
 // dropped it: FreeSBC's entries are the last it added on the way out, so
 // the bottom of the list is where they belong).

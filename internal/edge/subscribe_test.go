@@ -373,6 +373,8 @@ func TestSubscribeFromSwitchToClient(t *testing.T) {
 	if strings.Contains(got.Recipient.String(), contactTokenParam+"=") {
 		t.Errorf("binding token leaked to the client: %s", got.Recipient.String())
 	}
+	assertClientRecordRoute(t, "SUBSCRIBE at the client", got.GetHeaders("Record-Route"), portOf(h.publicUDP))
+	assertSwitchRecordRoute(t, "200 at the switch", res.GetHeaders("Record-Route"), portOf(h.privateSIP))
 	if c := got.Contact(); c == nil || c.Address.Port != portOf(h.publicUDP) {
 		t.Errorf("Contact at the client = %v, want FreeSBC's public socket", c)
 	}

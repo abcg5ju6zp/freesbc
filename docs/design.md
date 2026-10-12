@@ -127,10 +127,10 @@ Consequences that hold by construction:
 - `config` is read-only after publication.
 
 One deliberate process-wide side effect: `edge.New` calls
-`raiseUDPSendLimit()` (`internal/edge/edge.go:204`, defined at `:179`), a
+`raiseUDPSendLimit()` (`internal/edge/edge.go:235`, defined at `:210`), a
 `sync.Once` raise of **sipgo's** `sip.UDPMTUSize` to 8192, applied only when
 it is currently lower. sipgo has no per-user-agent override; the doc comment
-at `edge.go:157-178` explains why the 1300-byte default is unusable.
+at `edge.go:188-207` explains why the 1300-byte default is unusable.
 
 ---
 
@@ -144,19 +144,19 @@ Created once, alive for the process lifetime:
 |---|---|---|---|
 | `config.Store` | config | `app.Run` (`app.go:54`) | `atomic.Pointer[Config]` + subscriber list (no subscribers today) |
 | `edge.Server` | edge | `edge.New` (`app.go:58`) | binds nothing until `Run`; keeps its startup snapshot as `boot` |
-| `edge.topology` | edge | `edge.New` (`edge.go:199`) | immutable snapshot, built once from `boot` and the private socket |
-| `edge.pubPool` / `privPool` | edge, media | `newMediaPools` (`edge.go:226`, `mediapool.go:19`) | two `media.PlanePool`s over the one `rtp` range, bound to `public.bind` and the private IP; separate port namespaces |
-| `edge.carrierDirectory` | edge | `edge.New` (`edge.go:211`) | carrier name to addresses, plus the carrier source set; refreshed by a goroutine started in `Run` (`carrierdns.go`) |
-| `edge.carrierRegTable` | edge | `edge.New` (`edge.go:213`) | carrier registration token to binding (`carrierreg.go`) |
-| `edge.Location` | edge | `edge.New` (`edge.go:214`) | client registration binding table |
-| `edge.dialogTable` | edge | `edge.New` (`edge.go:227`) | grouped by Call-ID, matched on Call-ID + both tags |
-| `edge.subTable` | edge | `edge.New` (`edge.go:235`) | SUBSCRIBE dialog records matched on Call-ID + both tags, capped per binding and in all (`subscribe.go`, §7.8a); its removal hook is registered on `Location` (`edge.go:238`) |
-| `edge.cooldownTable` | edge | `edge.New` (`edge.go:216`) | `upstreamCooldown`, the passive switch-node penalty (`cooldown.go`) |
-| `edge.arrivalMarker` | edge | `edge.New` (`edge.go:200`) | per-process 128-bit secret behind the arrival header that marks a read on the trusted private socket (§7.1) |
-| `edge.enumLimiter`, `warnOnce` | edge | `edge.New` (`edge.go:220-221`) | REGISTER enumeration limiter and admission-drop log limiter (`admission.go`) |
+| `edge.topology` | edge | `edge.New` (`edge.go:230`) | immutable snapshot, built once from `boot` and the private socket |
+| `edge.pubPool` / `privPool` | edge, media | `newMediaPools` (`edge.go:268`, `mediapool.go:19`) | two `media.PlanePool`s over the one `rtp` range, bound to `public.bind` and the private IP; separate port namespaces |
+| `edge.carrierDirectory` | edge | `edge.New` (`edge.go:242`) | carrier name to addresses, plus the carrier source set; refreshed by a goroutine started in `Run` (`carrierdns.go`) |
+| `edge.carrierRegTable` | edge | `edge.New` (`edge.go:244`) | carrier registration token to binding (`carrierreg.go`) |
+| `edge.Location` | edge | `edge.New` (`edge.go:245`) | client registration binding table |
+| `edge.dialogTable` | edge | `edge.New` (`edge.go:269`) | grouped by Call-ID, matched on Call-ID + both tags |
+| `edge.subTable` | edge | `edge.New` (`edge.go:270`) | SUBSCRIBE dialog records matched on Call-ID + both tags, capped per binding and in all (`subscribe.go`, §7.8a); its removal hook is registered on `Location` (`edge.go:273`) |
+| `edge.cooldownTable` | edge | `edge.New` (`edge.go:247`) | `upstreamCooldown`, the passive switch-node penalty (`cooldown.go`) |
+| `edge.arrivalMarker` | edge | `edge.New` (`edge.go:231`) | per-process 128-bit secret behind the arrival header that marks a read on the trusted private socket (§7.1) |
+| `edge.enumLimiter`, `warnOnce` | edge | `edge.New` (`edge.go:251-253`) | REGISTER enumeration limiter and admission-drop log limiter (`admission.go`) |
 | `edge.regGuard` | edge | `edge.New` | the REGISTER credential guard: challenge nonces and branches relayed per source key, attempts already struck (`regguard.go`, §7.4) |
-| `media.DTLSIdentity` | media | `edge.New` (`edge.go:229-234`) when `edge.listen.ws` or `wss` is set | one self-signed identity per process (`media.ProcessDTLSIdentity`), shared by every WebRTC leg |
-| `shield.Shield` | shield | `edge.Server.Run` (`edge.go:449`) | one instance; bans and the strike (offender) table in process memory only; carrier sources are limited by `shield.carrier_rate_limit` and are never banned |
+| `media.DTLSIdentity` | media | `edge.New` (`edge.go:275-280`) when `edge.listen.ws` or `wss` is set | one self-signed identity per process (`media.ProcessDTLSIdentity`), shared by every WebRTC leg |
+| `shield.Shield` | shield | `edge.Server.Run` (`edge.go:594`) | one instance; bans and the strike (offender) table in process memory only; carrier sources are limited by `shield.carrier_rate_limit` and are never banned |
 | `admin.Server` | admin | `app.go:91` | only when an `admin:` section exists at startup |
 
 ### 3.2 Per-unit-of-work objects
@@ -194,16 +194,16 @@ after the first SIGINT/SIGTERM (`cmd/freesbc/main.go:94-97`).
 
 | Goroutine | Started | Exits |
 |---|---|---|
-| per listener: closer (`<-listenCtx.Done(); ln.Close()`) and `ln.Serve` | `Run` (`edge.go:467-477`) | `listenCtx` cancel / serve error |
-| registration and carrier-token prune ticker (30 s): `Location.Prune`, `carrierRegTable.prune`, then `publishCarrierRegistrations` | `Run` (`edge.go:530-552`) | `listenCtx` cancel |
-| carrier directory refresh (`carrierDirectory.Run`) | `Run` (`edge.go:529-532`) | `listenCtx` cancel |
+| per listener: closer (`<-listenCtx.Done(); ln.Close()`) and `ln.Serve` | `Run` (`edge.go:644-651`) | `listenCtx` cancel / serve error |
+| registration and carrier-token prune ticker (30 s): `Location.Prune`, `carrierRegTable.prune`, then `publishCarrierRegistrations` | `Run` (`edge.go:697-716`) | `listenCtx` cancel |
+| carrier directory refresh (`carrierDirectory.Run`) | `Run` (`edge.go:738-742`) | `listenCtx` cancel |
 | per confirmed dialog: media watcher (`<-sess.Done()`, then end the dialog) | `dialog.confirm` (`dialog.go:1082`) | session `Done` closed |
 | WebRTC establishment | `startWebRTC` (`media.go:327`) | `WebRTCSession.Start` returns |
 | `ackThenBye` (a 2xx FreeSBC will not relay) / `ack2xx` (its retransmission) | `refuse2xx` (`invite_leg.go:123-128`); `ack2xx` also from the re-INVITE relay (`indialog.go:110`) | its 5 s BYE context / after one write |
 | `sendCancel` (CANCEL toward a forwarded INVITE branch) | the INVITE paths (`invite.go:449,488`, `invite_leg.go:450,489`, `carrier.go:274`) | its 5 s CANCEL context |
 | `sendMiddleBye` (media ended a confirmed dialog; one per end) | `byeBothEnds` (`indialog.go:911`) | its 5 s BYE context |
 | per request: sipgo handler goroutine | sipgo | handler return (after the final response; `dialogTable` owns the dialog from then on) |
-| shield prune loop | `shield.New` (`shield.go:73`) | `Shield.Close` |
+| shield prune loop | `shield.New` (`shield.go:63`) | `Shield.Close` |
 
 **Media**
 
@@ -287,7 +287,7 @@ every member, so `Run` returns nil and the process exits 0.
 
 ### 4.3 Listener binding
 
-The edge's listener set (`edge.go:315-330`, `:400`) is fixed by the startup
+The edge's listener set (`edge.go:488-501`, `:626`) is fixed by the startup
 snapshot:
 
 | Socket | Address | Present when |
@@ -304,11 +304,11 @@ There are no wildcard binds: validation rejects `0.0.0.0` and `::` for
 sockets on separate addresses, so they have separate port namespaces.
 
 `Run` first checks that `public.bind` and `private.ip` are assigned to a local
-interface (`checkLocalAddr`, `edge.go:484`); `check`
+interface (`checkLocalAddr`, `edge.go:534`); `check`
 cannot do that. It then binds **every socket synchronously before serving
-any of them** (`edge.go:449-463`); on any failure every already-opened
+any of them** (`edge.go:618-635`); on any failure every already-opened
 listener is closed and `Run` returns. It then starts one serving goroutine
-per socket and waits (`awaitUDPServing`, `edge.go:591`, bounded by 5 s,
+per socket and waits (`awaitUDPServing`, `edge.go:659`, bounded by 5 s,
 `udpServingTimeout`) until every UDP listener is in sipgo's connection pool:
 sipgo pools a UDP listener only inside `ServeUDP`, on that goroutine, and a
 request pinned to the listener's address before then (every forward, §7.8)
@@ -316,12 +316,12 @@ misses the pool, so sipgo binds a second socket on the same address and fails
 with "address already in use", a 503 to the first callers after a restart.
 Stream listeners (tcp, tls, ws, wss) need no wait, since nothing is sent pinned to them. A serve
 error or the timeout during that wait makes `Run` return it. Only then does
-the unexported `ready` channel close (`edge.go:527`), so `ready` means every
+the unexported `ready` channel close (`edge.go:690`), so `ready` means every
 socket can both receive and send. Nothing in production waits on it; it is
 the happens-before edge the test harness uses.
 
 The edge installs a transport read filter on the sipgo user agent
-(`edge.go:394`, `readFilter` at `:863`) before any socket exists; §14 covers
+(`edge.go:568`, `readFilter` at `:942`) before any socket exists; §14 covers
 what it enforces.
 
 The edge deliberately bypasses sipgo's `ListenAndServe*` helpers and calls
@@ -384,8 +384,8 @@ Every top-level section is restart-only except `shield`. The table is
 | Hot (re-read per use) | Restart-only (`config.RestartOnlyChanges` key) |
 |---|---|
 | `shield.max_sessions`, `shield.invite_rate_limit`: `beginDialog` reads `store.Current()` once per out-of-dialog INVITE (`invite.go:240`); the effective session limit is `max_sessions` clamped to the boot `rtp` pairs (`sessionLimit`, `invite.go:204`) | |
-| `shield.rate_limit`, `shield.carrier_rate_limit`, `shield.ban`: the shield reads `store.Current()` on every check (`shield.go:123`), re-parsing a rate-limit string only when it changes (`shield.go:228`) | `public` (`ip`, `bind`) |
-| `shield.register_ban`: `Shield.Strike` reads `store.Current()` per strike, re-parsing only when the string changes (`strikeLimit`, `offenders.go`) | |
+| `shield.rate_limit`, `shield.carrier_rate_limit`, `shield.ban`: the shield reads `store.Current()` on every check (`shield.go:130`), re-parsing a rate-limit string only when it changes (`shield.go:231`) | `public` (`ip`, `bind`) |
+| `shield.register_ban`, `shield.admission_ban`: `Shield.Strike` reads `store.Current()` per strike, re-parsing only when the string changes (`strikeLimit`, `offenders.go`) | |
 | | `private` (`ip`) |
 | | `rtp` (the media pools read the range from `boot`, `mediapool.go:19`) |
 | | `tls` (certificates are loaded at bind: TLS and WSS in `openListener`; the admin in `admin.Server.Run`) |
@@ -436,7 +436,7 @@ SIGINT/SIGTERM gets Go's default action and ends the process even when the
 graceful shutdown hangs (audit P2-APP-008). There is no single deadline at
 the app level; each component bounds its own steps as below.
 
-**Edge** (`edge.go:574-577`): `s.dialogs.close()` → `listenCancel()` → each
+**Edge** (`edge.go:758-761`): `s.dialogs.close()` → `listenCancel()` → each
 listener's closer closes its socket → `wg.Wait()` (which also waits for the
 prune ticker and the carrier directory goroutine) → `s.dialogs.closeAll()`,
 which ends every dialog and therefore closes every media session. Closing the
@@ -517,17 +517,17 @@ What each handler does with the result:
 |---|---|---|---|---|
 | INVITE | `inviteToClient` | `inviteToCarrier` (`carrier.go:185`) | 404 | 404 (`invitePrivate`, `carrier.go:167`) |
 | REGISTER | 404 | `registerToCarrier` (`carrierreg.go:190`) | 404 | 404 (`onRegister`, `register.go:29-41`) |
-| OPTIONS | 200 locally | `optionsToCarrier` (`carrier.go:292`) | 200 locally | 404 (`onOptions`, `edge.go:976`) |
+| OPTIONS | 200 locally | `optionsToCarrier` (`carrier.go:292`) | 200 locally | 404 (`onOptions`, `edge.go:1176`) |
 | SUBSCRIBE | `subscribeToClient` (`subscribe.go:438`); a token naming no binding → 404 | 405 | 404 | 404 |
 | BYE, INFO, NOTIFY, MESSAGE | `directionFor` by token (no binding → **481**; a MESSAGE → **404**, `indialog.go:488-493`) | 405 | 404 | 404 (`onInDialog`, `indialog.go:450-463`) |
 | REFER | 481 (no To-tag) | 481 | 481 | 481 (`indialog.go:465-470`) |
-| any other method (PUBLISH) | 405 (`onNoRoute`, `edge.go:998`) | 405 | 405 | 405 |
+| any other method (PUBLISH) | 405 (`onNoRoute`, `edge.go:1198`) | 405 | 405 | 405 |
 
-An OPTIONS with a To tag is answered locally without classification (`edge.go:976-991`). A switch request that has a To tag takes the in-dialog path (§6.7), where the dialog record, not the Request-URI, decides the direction.
+An OPTIONS with a To tag is answered locally without classification (`edge.go:1176-1190`). A switch request that has a To tag takes the in-dialog path (§6.7), where the dialog record, not the Request-URI, decides the direction.
 
 ### 6.2 Inbound path: carrier to switch
 
-An out-of-dialog INVITE that arrives on a public listener goes through admission (`admitPublicInvite`, `internal/edge/admission.go:97`), in this order:
+An out-of-dialog INVITE that arrives on a public listener goes through admission (`admitPublicInvite`, `internal/edge/admission.go:104`), in this order:
 
 1. Its exact transport and IP:port is a live client registration (`Location.HasSource`): `srcClient`. A registration wins over a carrier source, so a client behind a carrier's address is never sent down the carrier path.
 2. Its source is a carrier source on the right transport: `srcCarrier`, with the carrier's name. A resolved `edge.carriers` address counts only when the request arrived over that carrier's own transport (`carrierFor(src, network)`), so a tls carrier's IP over UDP is not admitted; an `edge.carrier_sources` entry matches by IP on any public transport.
@@ -541,10 +541,10 @@ The carrier source set for the shield (`carrierSnapshot.isSource`, IP only, so a
 - Node choice (`invite.go:358-379`): when the Request-URI carries a carrier-registration token that names a live binding (§6.8), the call goes to that node only, with the Request-URI replaced by the switch's original Contact (`out.Recipient = pinned.contact`, `invite.go:403-405`), so the switch can identify the call by its registration line (Asterisk `line=yes`, FreeSWITCH `${sip_gateway}`). There is no failover in that case. With no token, or an unknown or expired one (logged at WARN), the node is chosen by the hash-user pool over the lower-cased Request-URI user, i.e. the DID (`carrierHashUser`, `carrier.go:126`; Request-URI user, else To user, else Call-ID), with the same cooldown-ordered retry as the client path, and the Request-URI is left unchanged.
 - FreeSBC appends `X-FreeSBC-Carrier: <name>` after `prepareForward` (`invite.go:400-402`); `unknown` for a carrier-source address that matches no entry. The same stamp is added to ACK and in-dialog requests from a carrier (`stampCarrier`, `carrier.go:152`), which also counts them in the metric.
 - The Contact toward the switch is FreeSBC's private address, the Record-Route is the usual RFC 5658 double pair, and the SDP is built from scratch with a private anchor port (the standard upstream offer, `buildUpstreamOffer`). Responses go back through `respToCarrier` (§6.5).
-- Carriers are exempt from the per-source early-call cap `maxEarlyPerSource` (`invite.go:35`, `invite.go:280-291`). `shield.carrier_rate_limit` bounds them instead, and the shield never scanner-bans a carrier source (`internal/shield/shield.go:145-146`). The predicate is the live directory snapshot (`edge.go:449`).
+- Carriers are exempt from the per-source early-call cap `maxEarlyPerSource` (`invite.go:35`, `invite.go:280-291`). `shield.carrier_rate_limit` bounds them instead, and the shield never scanner-bans a carrier source (`internal/shield/shield.go:152-153`). The predicate is the live directory snapshot (`edge.go:594`).
 - A request from a carrier source that matches no dialog record and is not an INVITE (an ACK or BYE for a call whose record is gone) takes the in-dialog fallback: hashed by the DID to a node's carrier address, with the same Request-URI restoration and stamp (`directionFor`, `indialog.go:844-851`; `restoreCarrierRURI`, `hide.go:314`). `carrierFallback` (`carrier.go:140`) is the test: a carrier source that is not an exact live registration address.
 
-A public OPTIONS, including a carrier's keepalive, is answered locally and never reaches the switch (`onOptions`, `edge.go:976`).
+A public OPTIONS, including a carrier's keepalive, is answered locally and never reaches the switch (`onOptions`, `edge.go:1176`).
 
 ```mermaid
 sequenceDiagram
@@ -575,7 +575,7 @@ Every header whose name starts with `x-freesbc-` (any case) is internal. Only Fr
 - A DNS-name entry without a port resolves through SRV ordered by priority and RFC 2782 weight (`orderSRV`, `carrierdns.go:334`), then A/AAAA per target (the SRV name is `_sip._udp`, `_sip._tcp` or `_sips._tcp` for a udp, tcp or tls carrier, `srvName`); with no SRV record it falls back to A/AAAA on the carrier's default port, 5060 (5061 for tls; `Carrier.DialPort`). An entry with an explicit port skips SRV and resolves A/AAAA only (RFC 3263 §4.2; `resolve`, `carrierdns.go:258`).
 - Resolution runs on the public side only; the switch is never asked and the private leg does no DNS.
 - A good answer is cached `carrierDNSTTL` = 300 s; a failed or empty one `carrierDNSNegTTL` = 10 s; one query is bounded by `carrierLookupTimeout` = 3 s (`carrierdns.go:40-51`). A failed refresh keeps the last good set (`refresh`, `carrierdns.go:238`), logged at WARN once per failure run. A failure at startup is not fatal: the carrier is unresolved, its INVITEs are dropped by admission and requests for it get 503, until a lookup succeeds.
-- `Run` (started from `edge.Run`, `edge.go:557`) refreshes once at start and then every 5 s checks which entries have expired (`carrierdns.go:242`). Each refresh publishes an immutable `carrierSnapshot` through an atomic pointer, so admission and the shield read it without locking.
+- `Run` (started from `edge.Run`, `edge.go:741`) refreshes once at start and then every 5 s checks which entries have expired (`carrierdns.go:242`). Each refresh publishes an immutable `carrierSnapshot` through an atomic pointer, so admission and the shield read it without locking.
 - A request to a carrier goes to the first resolved address only (`carrierDest`, `carrierreg.go:149`). There is no failover across SRV targets or addresses inside FreeSBC; line selection and failover belong to the switch. The order of a resolved set is re-drawn at each refresh (weighted-random within a priority), so the first address can change every 300 s for a name with several equal-priority targets.
 
 ### 6.5 Outbound path: switch to carrier
@@ -639,7 +639,7 @@ The switch REGISTERs its gateway at a carrier through FreeSBC (`registerToCarrie
 - The Contact toward the carrier becomes `sip:<user>@public.ip:<port>;fsbc=<token>` (plus `;transport=tcp|tls` for those carriers; the port is the carrier transport's listener port, else its default, `carrierSide`) (`carrierContactURI`, `carrierreg.go:179`). Its header parameters (`expires`, `q`) are kept; only the address changes. A wildcard `Contact: *` with `Expires: 0` goes upstream as is; a wildcard that is not a lone un-REGISTER is 400.
 - The token is `base32(sha256(node || "\n" || contact))` truncated to 26 characters, lower-cased (`carrierToken`, `carrierreg.go:140`). It is deterministic, so a FreeSBC restart does not strand the Contact the carrier holds: the switch's next refresh recreates the same token. It is an identifier, not a secret: anyone who can guess a node name and a Contact can compute it, so in principle it can be brute-forced to learn the switch's Contact; the carrier path admits only carrier sources.
 - On a `2xx` the binding `token → {carrier, node, original Contact, expiry}` is stored for the expiry the carrier granted (`GrantedExpires`, `internal/sip/register.go:52`, matched on this token's Contact). A `200` to `Expires: 0`, or a granted expiry of 0, removes it; a wildcard un-REGISTER removes every binding of that node at that carrier (`removeNode`). Challenges and failures change nothing. The response's Contact is restored to the switch's original with the granted expiry (`restoreContact`, `register.go:377`).
-- The table (`carrierRegTable`, `carrierreg.go:44`) is in memory and is separate from the client `Location`: a client token is random and names a public client, a carrier token is derived and names a switch registration, and neither lookup resolves the other's token. Expired bindings are not found by `lookup` and are reclaimed by a 30 s ticker (`edge.go:505-522`, `prune`, `carrierreg.go:92`).
+- The table (`carrierRegTable`, `carrierreg.go:44`) is in memory and is separate from the client `Location`: a client token is random and names a public client, a carrier token is derived and names a switch registration, and neither lookup resolves the other's token. Expired bindings are not found by `lookup` and are reclaimed by a 30 s ticker (`edge.go:697-716`, `prune`, `carrierreg.go:92`).
 - On a carrier request (`carrierRURI`, `carrierreg.go:280`) a token that names a live binding on a node still in `edge.switch` selects that node and restores the Contact (§6.2). Because the table is memory only, a request that arrives after a restart and before the switch's next REGISTER refresh finds no binding and is treated as addressed to the DID.
 
 ```mermaid
@@ -709,7 +709,7 @@ switch leg as well.
 3581). `side.recordRoute()` always carries `lr`.
 
 **Read filter** (`fsip.ReadFilter(fsip.MaxReadSize, accept)`, wrapped by
-`Server.readFilter`, `internal/edge/edge.go:799`): a UDP datagram or
+`Server.readFilter`, `internal/edge/edge.go:942`): a UDP datagram or
 WebSocket frame larger than **24 KiB** is dropped before the parser. The cap
 does not apply to a tcp or tls read (`fsip.IsByteStream`): there a read is an
 arbitrary chunk of the byte stream, so a message may arrive split over several
@@ -800,10 +800,10 @@ lives in process memory, is never logged or sent, and a leaked secret would
 let a public sender claim the private socket.
 
 The private direction switch every handler uses is `inbound.private()`
-(`arr == arrPrivate`, `edge.go:961`): the request reached the private
+(`arr == arrPrivate`, `edge.go:1161`): the request reached the private
 socket.
 
-**`guard`** (`edge.go:878`) wraps every handler: it first reads and strips the arrival
+**`guard`** (`edge.go:1031`) wraps every handler: it first reads and strips the arrival
 marker (above); a `recover()` that logs the panic, counts
 it (`freesbc_sip_handler_panics_total`) and answers 500 **only when the
 transaction has not already had a final response** (the handler is given a
@@ -856,7 +856,7 @@ logger adds. The wrapper also refuses to forward any `data` attribute added
 through `With`. Matching on the message is a sipgo v1.4.3 workaround
 (`TestSipgoParseFailureLogContract` fails if the string changes).
 
-**Drain mode.** `Server.SetDraining` (`edge.go:310`) flips a `drainState`
+**Drain mode.** `Server.SetDraining` (`edge.go:342`) flips a `drainState`
 (`drain.go:19`: an atomic flag read lock-free on every INVITE, plus a mutex
 that guards the `since` time) and the gauge `freesbc_edge_draining`
 (`Metrics.SetDraining`). `beginDialog` checks it first (`invite.go:243`),
@@ -1023,7 +1023,7 @@ RFC 7118 §5 HTTP ports for WebSocket, 80 for `ws` and 443 for `wss`.
 
 Registered handlers: `REGISTER`, `INVITE`, `ACK`, `CANCEL`, `BYE`, `INFO`,
 `NOTIFY`, `SUBSCRIBE`, `REFER`, `MESSAGE`, `PRACK`, `UPDATE`, `OPTIONS`, and
-`OnNoRoute` (`edge.go:466-475`).
+`OnNoRoute` (`edge.go:600-613`).
 
 | Method | Handling |
 |---|---|
@@ -1048,7 +1048,7 @@ a phone behind NAT.
 **Advertised extensions** (`sanitizeExtensions`, `internal/edge/extensions.go:37`). Every
 request `prepareForward` builds and every response `relayResponse` relays
 has its `Allow` cut down to the methods above that the proxy carries
-(`allowedMethods`, `edge.go:1010`); the header is rewritten only when
+(`allowedMethods`, `edge.go:1193`); the header is rewritten only when
 something is dropped, and one left empty is removed. `Supported`,
 `Require`, `RSeq` and `RAck` pass unchanged: reliable provisional responses
 (RFC 3262) and UPDATE (RFC 3311) are end to end, and Call-ID, tags and CSeq,
@@ -1070,7 +1070,7 @@ Per REGISTER:
    table in §7.3). Then, if the source is
    over the **enumeration limit**, drop it silently: no response, and
    nothing is forwarded (`enumLimiter.blocked`, `internal/edge/register.go:43`). The
-   limiter (`internal/edge/admission.go:243-329`) counts, per source key (an IPv4
+   limiter (`internal/edge/admission.go:333-419`) counts, per source key (an IPv4
    address; an IPv6 /64, as the shield's rate limiter keys it), the
    **distinct AoRs** whose REGISTER the switch answered with a final **403
    or 404** (`countsAsEnumeration`), in a fixed window of **10 minutes**
@@ -1139,7 +1139,7 @@ Per REGISTER:
    call.
 5. Walk `upstreamOrder(user)` (`register.go:104`) under the single shared
    budget. A node that answered nothing is penalized for the constant
-   `switchCooldown` (30 s, `edge.go:162`), so the phone's next REGISTER skips
+   `switchCooldown` (30 s, `edge.go:165`), so the phone's next REGISTER skips
    it in the dial order, and the attempt feeds the node's REGISTER circuit
    breaker (`cooldownTable.RegisterUnanswered`, `cooldown.go:108`): after
    `registerBreakerThreshold` (3) consecutive unanswered attempts the breaker
@@ -1214,18 +1214,18 @@ stateDiagram-v2
 ```
 
 Transitions: `recordBinding` (`internal/edge/register.go:305-342`) performs the insert and
-the removals; `Location.Put` (`location.go:107-148`) is the refresh-in-place
-path; `Binding.Expired` (`location.go:48`) is the predicate that hides an
-expired entry from `ByToken`/`ByAOR`; `Location.Prune` (`location.go:274`)
+the removals; `Location.Put` (`location.go:119-161`) is the refresh-in-place
+path; `Binding.Expired` (`location.go:49`) is the predicate that hides an
+expired entry from `ByToken`/`ByAOR`; `Location.Prune` (`location.go:374`)
 and `pruneAORLocked` delete expired entries; `RemoveBySource`
-(`location.go:168`) is called from the WebSocket close hook.
+(`location.go:182`) is called from the WebSocket close hook.
 
 `Location` keeps three indexes over one set of bindings: `byToken`, `byAOR`
 and `bySource` (keyed by `Binding.Source`). Every insertion goes through
 `Put` and every removal through `deleteLocked`, which maintain all three; a
 refresh from a new source re-indexes the binding under it. `bySource` serves
 `RemoveBySource` (no full scan) and `HasSource(transport, src)`
-(`location.go:188`), the INVITE admission lookup (§7.5), which ignores
+(`location.go:219`), the INVITE admission lookup (§7.5), which ignores
 expired bindings exactly as `ByToken` does. There is no eviction: a full
 table refuses a new binding (`ErrTooManyBindings`).
 
@@ -1246,7 +1246,7 @@ deliver.
 `onInvite` (`internal/edge/invite.go:47`) dispatches on the **arrival**
 `guard` passed in (§7.1), then on the request:
 
-1. **Admission** (`admitPublicInvite`, `internal/edge/admission.go:97`),
+1. **Admission** (`admitPublicInvite`, `internal/edge/admission.go:104`),
    for an INVITE with no To-tag that did not arrive on the private socket
    — that is, a public out-of-dialog INVITE. It runs first, before
    anything that could answer a scanner. The source is, in order:
@@ -1480,7 +1480,7 @@ re-ACKs its retransmissions (`reject2xx` remembers the tag). The same
 applies to a 2xx FreeSBC cannot anchor and to one that races a CANCEL.
 
 `count()` counts only confirmed dialogs; that is what `ActiveCalls()` reports
-(`edge.go:271`). `freesbc_active_sip_dialogs` is a separate mechanism over
+(`edge.go:317`). `freesbc_active_sip_dialogs` is a separate mechanism over
 the same set: the `Metrics.dialogs` gauge moved by `DialogStarted`/
 `DialogEnded` in `confirm`/`end` (`edge/metrics.go:185-186`), sampled
 through `Snapshot().ActiveDialogs` (`admin/metrics.go:180`).
@@ -1498,7 +1498,7 @@ reclamation of a confirmed dialog is the media silence watchdog, surfaced
 through `sess.Done()`. When it is the media that ends the dialog (the
 watchdog, or a WebRTC peer whose certificate does not match its
 fingerprint), `end()` reports it and the watcher calls the table's
-`onMediaEnd` — `byeBothEnds` (`indialog.go:911`, wired at `edge.go:228`) —
+`onMediaEnd` — `byeBothEnds` (`indialog.go:911`, wired at `edge.go:274`) —
 which sends **each endpoint a BYE on behalf of the other** (RFC 3261 §15):
 From/To and tags from the record, the Request-URI the endpoint's own
 Contact, the CSeq one above the highest the other endpoint used, out the
@@ -1874,8 +1874,8 @@ Record-Route handling as a call (double toward the switch, public entry only tow
 FreeSBC carried.
 
 - A public out-of-dialog SUBSCRIBE is admitted by `admitPublicOutOfDialog`
-  (`admission.go:130`): the transport source is the exact address of a live
-  registration (`Location.SourceBinding`, `location.go:214`, which also names
+  (`admission.go:137`): the transport source is the exact address of a live
+  registration (`Location.SourceBinding`, `location.go:243`, which also names
   the binding the subscription is charged to; the binding whose user equals
   the From user wins, else the first live one). A carrier source gets **405**;
   anyone else is dropped silently and counted as
@@ -1940,11 +1940,11 @@ NOTIFY still routes. A 2xx to a refresh resets the deadline. A NOTIFY answered
 2xx follows its `Subscription-State`: `terminated` ends the record,
 `expires=` moves the deadline. The record ends on a **481** to either request,
 on any non-2xx final to the initial SUBSCRIBE, on `prune` (the 30 s ticker,
-`edge.go:559`), on `closeAll` at shutdown (`edge.go:526`, `edge.go:597`), and when its
+`edge.go:707`), on `closeAll` at shutdown (`edge.go:662`, `edge.go:762`), and when its
 registration binding is removed: `Location` collects the tokens of every
 binding it deletes (un-REGISTER, `RemoveBySource` for a closed WS/WSS
 connection, expiry in `Prune`, the per-AoR sweep in `Put`) and hands them to
-`subTable.dropTokens` through `SetOnRemove` (`location.go:281`) **after** it
+`subTable.dropTokens` through `SetOnRemove` (`location.go:317`) **after** it
 releases its own lock, so `Location.mu` is never held when `subTable.mu` is
 taken (§11.2).
 
@@ -1977,7 +1977,7 @@ would let a REFER, MESSAGE or NOTIFY with a made-up To-tag past admission, so
 these three are answered **481** at the edge instead (`indialog.go:505`). A
 BYE or INFO is still hashed to the switch (a registered client or a carrier
 whose dialog record is gone, e.g. after a restart), but only when
-`admitDialogless` (`admission.go:154`) passes: the source is the exact
+`admitDialogless` (`admission.go:161`) passes: the source is the exact
 transport address of a live registration or a carrier source
 (`admitPublicInvite`). Any other public source is answered **481** and counted
 as `dialogless_not_admitted`; nothing is sent upstream (`indialog.go:512`).
@@ -2143,7 +2143,7 @@ pointed or latched before the answer is applied, and no SDP crosses.
   retransmissions repeat the same offer body.
 - *Backstop.* `armOwedTimer` (`offerless.go:159`) starts after a 2xx is
   relayed with an answer owed: if no ACK has supplied it after `ackTimeout`
-  (32 s, RFC 3261 Timer H; `edge.go:257`), `owedExpired` drops it and ends the
+  (32 s, RFC 3261 Timer H; `edge.go:303`), `owedExpired` drops it and ends the
   call with a BYE to both sides, so a lost ACK cannot leave a half-negotiated
   session or a stuck offer slot.
 
@@ -2221,7 +2221,7 @@ The classification lives in the loop of `inviteToUpstream`
   so a second attempt would apply a second answer. A transaction that ended
   without a transport error (the shared budget, a node that went quiet
   after answering) is not something another node fixes either.
-  A failed node is penalized for `switchCooldown` (30 s, `edge.go:162`) and
+  A failed node is penalized for `switchCooldown` (30 s, `edge.go:165`) and
   the next in hash order is tried (§7.6).
 - A **carrier → switch call pinned to a registration** has exactly one node
   in its order, so a failure is the end of the series.
@@ -2294,7 +2294,7 @@ allocation**: `AllocateAcross` reads each pool once (`session.go:355`),
 pair is bound from that one value (`allocatePairWith`). The range and bind
 address come from the startup snapshot, because the address SDP advertises is
 part of the topology built at startup, so `rtp` is restart-only; only the
-timeout is read live, through `Server.mediaTimeout` (`edge.go:239`), for every
+timeout is read live, through `Server.mediaTimeout` (`edge.go:285`), for every
 new session. The advertised address is the signalling plane's concern and
 reaches SDP only through `sdp.Build.Address`.
 
@@ -2494,13 +2494,13 @@ RTCP receiver reports (RFC 3550; RFC 3264 §5.1 keeps RTCP flowing on hold)
 stays alive. A held endpoint that sends **neither** RTP nor RTCP for the
 timeout is reclaimed.
 
-`timeout` is the constant `rtpSilenceTimeout`, **5 minutes** (`edge.go:130`),
+`timeout` is the constant `rtpSilenceTimeout`, **5 minutes** (`edge.go:161`),
 read through `Server.mediaTimeout` when the pool's params are read at
 allocation (from **pool A** even though the two sides come from different
 pools). A `WebRTCSession` tracks the browser (side A) and the switch (side B)
 the same way, with its default timeout taken from the private pool's params
 (`webrtcsession.go:85-88`). Only tests shorten it (`setRTPTimeout`,
-`edge.go:243`).
+`edge.go:289`).
 
 `lastRx` is refreshed **only after a packet is proven genuine**: latch
 acceptance for a plain leg, and successful SRTP authentication on a browser
@@ -2511,7 +2511,7 @@ The watchdog is the backstop for a half-dead call whose BYE was lost. It
 fires the per-dialog media watcher goroutine, which calls
 `dialog.end(endRTPSilence)` (the session records `media.CloseSilence` before
 `Done` fires, and `Cause()` reports it) and then sends a BYE to both
-endpoints (`byeBothEnds`, wired at `edge.go:228`; §7.7). The call is counted
+endpoints (`byeBothEnds`, wired at `edge.go:274`; §7.7). The call is counted
 in `freesbc_edge_calls_ended_total{reason="rtp_silence"}` and its `"call
 ended"` line carries `reason=rtp_silence`. That watcher is launched by `confirm` (`dialog.go:1082-1121`), so it
 exists only for a **confirmed** dialog; an early one is reclaimed by
@@ -2656,7 +2656,7 @@ handshake no longer leaks it.
 **DTLS identity.** One self-signed ECDSA P-256 certificate per process
 (`media.ProcessDTLSIdentity`, `dtlscert.go:44`), generated on first use and
 shared by every session. `edge.New` builds it only when `edge.listen.ws` or
-`wss` is set (`edge.go:229-234`); there is no certificate file. WebRTC binds
+`wss` is set (`edge.go:275-280`); there is no certificate file. WebRTC binds
 the certificate to a call through the `a=fingerprint` line, not through the
 certificate being unique or trusted.
 
@@ -3176,17 +3176,17 @@ If the forward fails, FreeSBC makes one stateless re-send attempt and answers
 
 | Entity | Owner | Created where | Transitions | Invariants | Who may mutate | Cleanup trigger | Concurrency protection |
 |---|---|---|---|---|---|---|---|
-| **edge binding** (`Binding`) | `Location` (`edge/location.go:58`) | `recordBinding` → `Location.Put` (`register.go:305`) | active → refreshed (same token) / expired / removed | expiry always comes from the registrar's **response**; `Source` is the transport source, never the Contact host; ≤ 10 per AoR, ≤ 20000 total (`location.go:78-81`) | handler goroutines, the WS close hook, the prune ticker | un-REGISTER, `granted <= 0`, WebSocket close, expiry + the 30 s prune ticker (`edge.go:504-522`) | `Location.mu` (RWMutex) |
+| **edge binding** (`Binding`) | `Location` (`edge/location.go:59`) | `recordBinding` → `Location.Put` (`register.go:305`) | active → refreshed (same token) / expired / removed | expiry always comes from the registrar's **response**; `Source` is the transport source, never the Contact host; ≤ 10 per AoR, ≤ 20000 total (`location.go:89-90`) | handler goroutines, the WS close hook, the prune ticker | un-REGISTER, `granted <= 0`, WebSocket close, expiry + the 30 s prune ticker (`edge.go:697-716`) | `Location.mu` (RWMutex) |
 | **carrier registration** (`carrierBinding`) | `carrierRegTable` (`carrierreg.go:44`) | `registerToCarrier` on a 2xx with a granted lifetime (`carrierreg.go:190`) | live → refreshed (same deterministic token) / expired / removed | keyed by token = `carrierToken(node, Contact)`; holds the registering `edge.switch` node name and the switch's original Contact; separate from `Location`, so a client token never resolves a carrier token or the reverse; a lookup treats an expired entry as absent | `registerToCarrier`, the prune ticker | granted lifetime elapsed (30 s prune), a `200` to `Expires: 0`, a wildcard un-REGISTER (`removeNode`); lost on restart, rebuilt by the switch's next refresh under the same token | `carrierRegTable.mu` |
 | **carrier directory** (`carrierSnapshot`) | `carrierDirectory` (`carrierdns.go:116`) | `newCarrierDirectory` in `edge.New`; refreshed by `Run`'s goroutine | resolved set replaced whole on each refresh; a failed refresh keeps the last good set | name → addresses (SRV or A/AAAA, `carrierDNSTTL` 300 s, failed lookup retried after 10 s, 3 s per query: `carrierdns.go:40-47`) plus the carrier source prefixes; read lock-free by every request | the refresh goroutine only | process exit | `atomic.Pointer[carrierSnapshot]` for readers; `carrierDirectory.mu` guards its cache; `refresh` takes it only to read and to record an outcome (`apply`), never across a lookup, and only the refresh goroutine runs lookups, so `rand.Rand` is unshared |
 | **edge dialog** (`*edge.dialog`) | `dialogTable` (`dialog.go:322`) | `begin(req, callerPlane, limit)` (`dialog.go:380`); a second early record with the same Call-ID and caller tag is refused (482, `invite.go:239`) | `dialogEarly → dialogConfirmed → dialogEnded` (or early → ended) (`dialog.go:20-36`) | matched on Call-ID + both tags; per-fork answers while early; **one media session per record**; `confirm` (before the 2xx is relayed) refuses without media; `end` removes exactly this record; a carrier dialog also records the carrier name (`setCarrier`, `dialog.go:682`) and its far-end address on the node's carrier port | any handler goroutine, via the table's methods; the Timer M hook | tag-matched BYE the far end did not refuse, media watchdog, `endUnlessUp`, `closeAll` | `dialogTable.mu` guards the map, the `closed` flag **and every mutable field of every dialog**; `confirm`/`end` drop the lock before metrics and `sess.Close()` |
 | **edge inviteAttempt** | the dialog's `inFlight` slot | `d.track(...)` per attempt, **before** the INVITE is sent | tracked → `markSent` → overwritten by the next attempt → taken by `cancelSeries` or cleared by `untrack` | holds the request **as forwarded**, the **series** cancel, and `sent`/`cancelled`; a CANCEL finds the record by Call-ID + From tag; `cancelSeries` guarantees exactly one canceller and never lets a CANCEL overtake its INVITE | handler goroutines through `track`/`markSent`/`untrack`; the OnCancel hook and the backstop through `cancelSeries` | `defer d.untrack()` on handler return; `cancelSeries` on CANCEL or backstop | `dialogTable.mu` |
-| **switch cooldown** | one `cooldownTable` on `Server` (`cooldown.go:19`), which also holds the per-node REGISTER breaker `reg[name]` (closed ⇄ open ⇄ half-open probe) | `edge.New` | absent ⇄ `until[name]` | keyed by the node's `IP:port` name, never by anything a client supplies; all-cooling falls back to dialling everything; `switchCooldown` = 30 s (`edge.go:162`) | handler goroutines only | `Recover` on any final response; lazy expiry otherwise | `cooldownTable.mu` |
+| **switch cooldown** | one `cooldownTable` on `Server` (`cooldown.go:19`), which also holds the per-node REGISTER breaker `reg[name]` (closed ⇄ open ⇄ half-open probe) | `edge.New` | absent ⇄ `until[name]` | keyed by the node's `IP:port` name, never by anything a client supplies; all-cooling falls back to dialling everything; `switchCooldown` = 30 s (`edge.go:165`) | handler goroutines only | `Recover` on any final response; lazy expiry otherwise | `cooldownTable.mu` |
 | **media Session** | the dialog that allocated it | `media.AllocateAcross(pubPool, privPool, …)` (`media/session.go:355`) | `sessAllocated → sessRunning → sessClosed` (`session.go:336`) | forward-only; `Start` starts the relay at most once; `Close` is idempotent and safe from any goroutine; an unstarted session has **no watchdog** | `SetRemote`, `SetExpectedRemote`, `SetSignallingSource`, `Relatch` from the signalling goroutine; `Close` from anywhere | `dialog.end()`, the watchdog, `recoverRelayPanic` | `state atomic.Int32` (CAS/Swap), `lastRx [2]atomic.Int64` (one per sending side), per-latch `mu` |
 | **port allocation** | `PlanePool.inUse` (`media/portpool.go:73`) | `allocatePair` / `allocateSingle` | reserved → released | RTP even, RTCP = RTP+1; a muxed WebRTC socket still reserves the odd port; a partial `AllocateAcross` releases side A; the public and private pools share the `rtp` range but bind different IPs, so they never collide | the pool only | `Session.Close`, `WebRTCSession.Close`, `WebRTCLeg.Close`, the `AllocateAcross` failure path | `PlanePool.mu`, held only to reserve a candidate; binds run outside it |
 | **SRTP context** | one direction of one browser leg | `newSRTPContextFromKeys` after the DTLS handshake (`media/srtp.go:254`, `webrtcleg.go:607`) | installed once → dropped with the leg | keys come only from DTLS-SRTP key export and are never copied across legs; replay windows 64 (SRTP) / 128 (SRTCP) per context | the leg's `deriveSRTP`, exactly once | dropped with the leg | `SRTPContext.mu` serialising pion's lockless context; the leg holds the pair under `WebRTCLeg.mu` |
 | **WebRTC leg** | `WebRTCSession` (which closes it) | `NewWebRTCLeg` in `allocateWebRTC` or (offerer leg) `allocateOfferedWebRTC` (`edge/media.go:279`, `:365`) | `legAllocated → legEstablishing → legEstablished \| legFailed → legClosed` | forward-only, `legClosed` terminal; first error wins; keys set exactly once — no re-keying, no ICE restart | `setState`/`set` only, under `mu` | `Close` from `WebRTCSession.Close`, the failure path in `Start`, or a fingerprint mismatch | `WebRTCLeg.mu` for agent/mux/demux/contexts/state; `readyOnce`; handles snapshotted under the lock and closed outside it |
-| **shield ban entry** | `banList[K]`, two per `Shield`: `bans` (IP) and `socketBans` (UDP IP:port) (`shield/shield.go:25-32`) | `ban(key, dur)` from `CheckScanner`'s scanner branch | absent → banned (extendable) → expired (lazy) → removed | hard cap **65536** per table (`banCap`) with an overflow counter; a socket ban lasts at most 1 min (`socketBanMax`); carrier sources are never scanner-banned | `ban`, `banned` (lazy delete), `prune` | lazy expiry on lookup, the 1-minute prune tick, or process exit | `banList.mu` |
+| **shield ban entry** | `banList[K]`, two per `Shield`: `bans` (IP) and `socketBans` (UDP IP:port) (`shield/shield.go:32-33`) | `ban(key, dur)` from `CheckScanner`'s scanner branch | absent → banned (extendable) → expired (lazy) → removed | hard cap **65536** per table (`banCap`) with an overflow counter; a socket ban lasts at most 1 min (`socketBanMax`); carrier sources are never scanner-banned | `ban`, `banned` (lazy delete), `prune` | lazy expiry on lookup, the 1-minute prune tick, or process exit | `banList.mu` |
 | **rate-limit bucket** | the one `rateLimiter` per `Shield` | first `allow` for that source | fresh (full) → drained → refilled | capacity equals rate; a fresh bucket starts full; parameters (`rate_limit` for ordinary sources, `carrier_rate_limit` for carrier sources) are passed per call so a reload applies immediately | `allow`, `prune` | `prune` drops a bucket once it has been idle for its own refill interval (so it is full); at **65536** buckets (`bucketCap`) the least recently used is evicted; the global bucket is never pruned | `rateLimiter.mu` |
 | **config snapshot** | `config.Store` (`config/store.go`) | `config.Load` → `NewStore` / `Replace` | published → superseded | a published `*Config` is **never mutated**; the compiled switch list, carrier list and source prefixes are populated by `validate` before publication | only `Replace` | garbage collection once no goroutine holds a reference | `atomic.Pointer[Config]` for the snapshot; `Store.mu` only for the subscriber slice |
 
@@ -3203,7 +3203,7 @@ If the forward fails, FreeSBC makes one stateless re-send attempt and answers
   map (`Server.carrierURIs`) is built the same way.
 - **`edge.Server.srv` and `client` are written in `Run` without
   synchronisation**, safe under the "no handler runs before `ln.Serve`"
-  argument; the tests use the `ready` channel (`edge.go:108`) as the
+  argument; the tests use the `ready` channel (`edge.go:127`) as the
   happens-before edge. `Server.shield` is assigned in `Run` under
   `shieldMu`, because the admin API reads it (`ShieldStats`) from another
   goroutine.
@@ -3305,7 +3305,7 @@ spin.
 
 | Umbrella | Scope |
 |---|---|
-| `edge.guard` (`edge.go:878`) | every registered edge handler; logs, counts, and answers 500 unless a final already went out |
+| `edge.guard` (`edge.go:1031`) | every registered edge handler; logs, counts, and answers 500 unless a final already went out |
 | `media.recoverRelayPanic` (`media/relay.go:115`) | every relay goroutine; closes **that session only** |
 | `admin.recoverMW` (`admin/server.go:626`) | every HTTP handler; logs the panic with its stack, answers 500 with no stack in the body, and re-panics `http.ErrAbortHandler` per the stdlib convention |
 | `config.unmarshalStrict` (`config/loader.go:54`) | the go-yaml decoder inside `Parse`; a decoder panic becomes a parse error |
@@ -3322,7 +3322,7 @@ The topology is two addresses, each written once (`docs/config.md`).
 - **Public side.** Every public socket binds `public.bind` (default
   `public.ip`; it differs only behind 1:1 NAT, where `public.ip` is not a
   local address). Listeners are `udp`, `tcp`, `tls`, `ws` and `wss` on the ports of
-  `edge.listen` (`edge.go:315-326`). Everything advertised to phones,
+  `edge.listen` (`edge.go:486-501`). Everything advertised to phones,
   browsers and carriers (Via, Contact, Record-Route, SDP `c=`) names
   `public.ip` and the port the listener bound: there is deliberately no
   port-translation field.
@@ -3331,7 +3331,7 @@ The topology is two addresses, each written once (`docs/config.md`).
   Via, Contact and Record-Route toward the switch name it
   (`topology.go:148-205`). Private media binds `private.ip` and advertises it.
 - **Startup checks.** `run` fails if `public.bind` or `private.ip` is not
-  assigned to a local interface (`checkLocalAddr`, `edge.go:329-354`), because
+  assigned to a local interface (`checkLocalAddr`, `edge.go:531-543`), because
   a bind to anything else fails late and an address that is not ours would be
   advertised to peers that can never reach it. `check` opens and binds nothing.
 - **Media.** Two `PlanePool`s share the one `rtp` range: public bound to
@@ -3386,7 +3386,7 @@ The topology is two addresses, each written once (`docs/config.md`).
   two pools, and nothing sizes a pool for you.
 - SIP over UDP is sent above the RFC 3261 §18.1.1 guidance: the process-wide
   `sip.UDPMTUSize` is raised to **8 KiB** (`raiseUDPSendLimit`,
-  `edge.go:179`), relying on IP fragmentation to survive the path. A
+  `edge.go:210`), relying on IP fragmentation to survive the path. A
   realistic switch INVITE plus proxy headers clears 1300 bytes, and the RFC's
   remedy — switch to TCP — is unavailable when both ends are UDP.
 
@@ -3416,7 +3416,7 @@ self-signed certificate.
 | Assumption | Status |
 |---|---|
 | `public.ip` is the address phones, browsers and carriers reach; `public.bind` and `private.ip` are local addresses | **Enforced at `run`** (`checkLocalAddr`); validation requires specific IPs (no wildcard) and `private.ip` ≠ `public.bind` |
-| Only the switch speaks on the private socket | **Enforced by the read filter**: the private UDP socket admits only `edge.switch` node IPs and stamps the arrival marker; a datagram from any other source is dropped before parsing (`edge.go:747-771`). A LAN host that is itself a node address is trusted |
+| Only the switch speaks on the private socket | **Enforced by the read filter**: the private UDP socket admits only `edge.switch` node IPs and stamps the arrival marker; a datagram from any other source is dropped before parsing (`edge.go:957-963`). A LAN host that is itself a node address is trusted |
 | The private LAN between FreeSBC and the switch is trusted | **Assumed.** SIP to the switch is plain UDP and carries per-call Via/Contact data |
 | Every inbound carrier's signalling IPs are an `edge.carriers` address (literal IP or resolved DNS name) or listed in `edge.carrier_sources` | **Assumed.** An INVITE from any other unregistered public source is dropped silently (§7.5); `edge.carrier_sources` has a width cap (no wider than IPv4 /8 or IPv6 /32) |
 | A carrier name's DNS answer is honest | **Assumed.** The resolved addresses become carrier sources and send targets; there is no DNSSEC |
@@ -3457,9 +3457,9 @@ permanent series per call."
 | Metric | Type | Labels | Fed by |
 |---|---|---|---|
 | `freesbc_active_calls` | Gauge | — | edge `ActiveCalls()`: confirmed dialogs |
-| `freesbc_media_ports_in_use` | Gauge | — | RTP/RTCP pairs in use, the public and private pools' `Stats()` summed (`Server.PortStats`, `edge.go:279`) |
+| `freesbc_media_ports_in_use` | Gauge | — | RTP/RTCP pairs in use, the public and private pools' `Stats()` summed (`Server.PortStats`, `edge.go:365`) |
 | `freesbc_media_ports_total` | Gauge | — | the same pools, summed capacity in pairs |
-| `freesbc_shield_drops_total` | Counter | `reason` ∈ {`banned`, `scanner`, `rate`} | the edge shield's drop counters (`Server.ShieldStats`, `edge.go:287`) |
+| `freesbc_shield_drops_total` | Counter | `reason` ∈ {`banned`, `scanner`, `rate`} | the edge shield's drop counters (`Server.ShieldStats`, `edge.go:373`) |
 | `freesbc_build_info` | Gauge (always 1) | `version` | `Deps.Version` |
 | `freesbc_admin_health_status` | Gauge | — | overall health from `/api/health` (§13.6): 0 ok, 1 degraded, 2 critical; evaluating it on a scrape also feeds the history; absent when admin is not running |
 | `freesbc_active_registrations` | Gauge | — | edge `Location.Count()`, stored on every binding change and prune |
@@ -3475,7 +3475,7 @@ permanent series per call."
 | `freesbc_active_webrtc_sessions` | Gauge | — | edge |
 | `freesbc_registration_total` | Counter | — | edge `recordBinding` success |
 | `freesbc_registration_failure_total` | Counter | — | edge: series exhaustion, a rejected registration, and a full binding table |
-| `freesbc_sip_requests_total` | Counter | `method` (one of the 14 methods sipgo names, else `OTHER`), `transport` (`UDP`/`TCP`/`TLS`/`WS`/`WSS`, else `OTHER`) | edge `guard`, for every request the shield admits (`edge.go:878`) |
+| `freesbc_sip_requests_total` | Counter | `method` (one of the 14 methods sipgo names, else `OTHER`), `transport` (`UDP`/`TCP`/`TLS`/`WS`/`WSS`, else `OTHER`) | edge `guard`, for every request the shield admits (`edge.go:1031`) |
 | `freesbc_sip_responses_total` | Counter | `class` (`1xx`…`6xx`) | every response the edge sends or relays |
 | `freesbc_rtp_packets_rx_total` / `_tx_total` | Counter | — | edge: finished sessions folded in at `dialog.end()` (`dialog.go:1197`, `Metrics.MediaEnded`) plus every live session's own atomic counters sampled at scrape time (`Metrics.rtpTotals`). `Metrics.mediaMu` makes "leave the live set, fold the final counters into the finished total" one step against a scrape, so a session is never counted twice and the series never goes backwards; no per-packet cost |
 | `freesbc_rtp_bytes_rx_total` / `_tx_total` | Counter | — | the same as the packets series |
@@ -3490,7 +3490,7 @@ permanent series per call."
 | `freesbc_edge_register_unanswered_total` | Counter | — | edge `registerUnanswered` (`register.go:25`): one per REGISTER attempt a switch node answered with nothing (a silent node or a transport error); no node label |
 | `freesbc_edge_register_breaker_rejects_total` | Counter | — | edge `RegisterBreakerRejected`: one per client REGISTER answered 503 + `Retry-After: 30` without dialing because every node's REGISTER breaker was open (§7.4) |
 | `freesbc_edge_register_auth_failures_total` | Counter | — | edge `registerStrike` (`regguard.go`): one per failed REGISTER credential attempt struck against its source (§7.4), replays counted in the read filter included. No `source` label: the sources are in `GET /api/shield/offenders` |
-| `freesbc_edge_admission_drops_total` | Counter | `reason` ∈ {`invite_not_admitted`, `register_enumeration`, `subscribe_not_admitted`, `message_not_admitted`, `dialogless_not_admitted`} | edge `dropSilently` (`admission.go:169`): a public out-of-dialog INVITE refused by admission (§7.5), a REGISTER from a source over the enumeration limit (§7.4), an out-of-dialog SUBSCRIBE or MESSAGE from a source without a live registration (§7.8a), a BYE or INFO naming no dialog from a source that is neither a live registration nor a carrier (answered 481, §7.8a); every reason is always exported |
+| `freesbc_edge_admission_drops_total` | Counter | `reason` ∈ {`invite_not_admitted`, `register_enumeration`, `subscribe_not_admitted`, `message_not_admitted`, `dialogless_not_admitted`} | edge `dropSilently` (`admission.go:177`): a public out-of-dialog INVITE refused by admission (§7.5), a REGISTER from a source over the enumeration limit (§7.4), an out-of-dialog SUBSCRIBE or MESSAGE from a source without a live registration (§7.8a), a BYE or INFO naming no dialog from a source that is neither a live registration nor a carrier (answered 481, §7.8a); every reason is always exported |
 | `freesbc_edge_calls_ended_total` | Counter | `reason` ∈ {`bye_caller`, `bye_callee`, `bye_unanswered`, `rtp_silence`, `dtls_failure`, `reinvite_refused`, `answer_timeout`, `answer_unusable`, `media_fault`, `shutdown`, `ack_timeout`} | edge `dialog.end` (`dialog.go:1144`), one per confirmed call that ended, by the reason of the `end` that won (§7.7); every reason is always exported |
 | `freesbc_edge_ack_missed_total` | Counter | `plane` ∈ {`public`, `private`}: the side that failed to ACK a 2xx | edge `noteAckMiss` (`ack.go`), once per missed ACK (§7.7); both planes are always exported |
 | `freesbc_edge_invite_rejects_total` | Counter | `reason` ∈ {`early_cap`, `shutting_down`, `loop_detected`, `no_public_side`, `webrtc_disabled`, `no_target`, `too_many_hops`, `media_failed`, `port_exhausted`, `upstream_failed`, `timeout`, `session_cap`, `invite_rate`, `draining`} | edge `rejectInvite` / `rejectBusy` (`invite.go:148`, `invite.go:187`), one per final response the edge itself sends to an out-of-dialog INVITE (§7.7); every reason is always exported |
@@ -3512,7 +3512,7 @@ There is no config-reload metric and no carrier DNS metric.
 | Level | Examples |
 |---|---|
 | `Error` | `"proxy handler panic"` (+ stack); `"registration binding rejected"`; `"rejecting call: media ports exhausted"`; media relay panic (`"media relay panic; killing session"`); `"admin handler panic"` (+ stack); `"config watcher error"`, `"config reload failed, keeping previous config"`; `"config watcher exited"`, `"edge proxy exited"`, `"admin server exited"` |
-| `Warn` | `"config reload changes restart-only settings; …"`; `"config written via admin API"`; `shield banned scanner`; `shield banned source for repeated failures` (once per source key and window, §14.1); `"public request dropped by admission; …"` (the first drop per source IP and reason, remembered in a FIFO set capped at 4096, `maxWarnedSources`, `admission.go:188`); `"REGISTER enumeration limit reached; …"`; `"rejecting call: too many unanswered calls from one source"`; `"upstream INVITE unanswered; entering cooldown"` / `"upstream REGISTER unanswered; entering cooldown"` / `"upstream REGISTER unanswered; breaker open, REGISTERs not dialed"` (at most one per node per 30 s, plus one at each breaker opening); `"forward INVITE upstream"` / `"forward INVITE to client"` / `"forward INVITE to carrier"` / `"forward carrier REGISTER"` failures; `"carrier has no resolved address"`; `"carrier DNS lookup failed; keeping the last good addresses"`; `"carrier request names an unknown or expired registration token; …"`; `"2xx ACK never arrived; …"` (the first miss per plane, then at most one per minute, with `suppressed`); `"webrtc leg failed"`; the fingerprint-mismatch teardown; `"rejecting call to WebSocket client: …"` (a WebSocket client with no ws/wss listener cannot be offered DTLS-SRTP) |
+| `Warn` | `"config reload changes restart-only settings; …"`; `"config written via admin API"`; `shield banned scanner`; `shield banned source for repeated failures` (once per source key and window, §14.1); `"public request dropped by admission; …"` (the first drop per source IP and reason, remembered in a FIFO set capped at 4096, `maxWarnedSources`, `admission.go:278`); `"REGISTER enumeration limit reached; …"`; `"rejecting call: too many unanswered calls from one source"`; `"upstream INVITE unanswered; entering cooldown"` / `"upstream REGISTER unanswered; entering cooldown"` / `"upstream REGISTER unanswered; breaker open, REGISTERs not dialed"` (at most one per node per 30 s, plus one at each breaker opening); `"forward INVITE upstream"` / `"forward INVITE to client"` / `"forward INVITE to carrier"` / `"forward carrier REGISTER"` failures; `"carrier has no resolved address"`; `"carrier DNS lookup failed; keeping the last good addresses"`; `"carrier request names an unknown or expired registration token; …"`; `"2xx ACK never arrived; …"` (the first miss per plane, then at most one per minute, with `suppressed`); `"webrtc leg failed"`; the fingerprint-mismatch teardown; `"rejecting call to WebSocket client: …"` (a WebSocket client with no ws/wss listener cannot be offered DTLS-SRTP) |
 | `Info` | `"edge proxy listening"`, `"media planes ready"`, `"freesbc started"`, `"shutting down"`, `"admin server listening"`, `"config reloaded"`; `"proxying INVITE upstream"` / `"proxying INVITE to client"` / `"proxying INVITE to carrier"`; `"carrier registration"` with the granted expiry; `"carrier resolved"`; `"registration accepted"` / `"removed"` / `"rejected"`; `"webrtc media established"`; `"rejecting call: media not negotiable"`; `"ending the call; sending BYE to both ends"` with the `reason`; `"call ended"` with `reason`, `terminated_by`, `duration`, `webrtc`, `carrier` and media stats |
 | `Debug` | dialog ACK/BYE bookkeeping; `"2xx ACK never arrived"` for every miss; shield rate-limit drops and scanner-datagram drops; edge `"public request dropped by admission"` after the first per source; `"in-dialog request without a dialog record; hashing upstream"` and its carrier variant; `"pruned expired registration bindings"` / `"pruned expired carrier registrations"`; `"carrier DNS lookup still failing"`; `"forward carrier OPTIONS"`; dropped unroutable responses |
 
@@ -3543,9 +3543,9 @@ Host and Origin checks (§14, Admin) before any auth work, on every route but
 | `/api/status` | any | Basic | `{"version","uptime_seconds","active_calls","ports":{"in_use","total"},"listeners":[…],"listener_info":[{"transport","bind","advertised","private"}]}`; `listener_info` pairs each bound socket with the address FreeSBC advertises for it (`public.ip` on a public listener, equal to `bind` outside 1:1 NAT; `Deps.ListenerInfos`); `listeners` are the sockets the edge bound, from its startup snapshot (`Deps.Listeners`): `udp://`, `tcp://`, `tls://`, `ws://`, `wss://` on `public.bind`, then `udp://<private.ip>:5060 (private)`. It also carries `"reload":{"last_ok","restart_required","last_error","last_error_at"}` (`Deps.Reload`, §4.4): the times are RFC 3339 UTC and null until they apply (`last_ok` before the first reload; `last_error` and `last_error_at` while the last reload has not failed), `restart_required` is always an array |
 | `/api/calls` | any | Basic | array of `{"id","call_id","from","to","started" (RFC 3339),"duration_seconds"}`; always an array. Confirmed edge dialogs only, the set `active_calls` counts: `id` is `edge:<Call-ID>;<caller tag>`; `from`/`to` are `edge:public` / `edge:private` for a client call, and `carrier:<name>` / `switch:<ip:port>` for a carrier call, caller first (`dialogTable.calls`, `dialog.go:544`) |
 | `/api/tls` | GET (else 405 + `Allow: GET`) | Basic | `{"loaded": false}` when no listener loaded the top-level `tls` pair; else `{"loaded": true, "subject" (CN), "sans", "issuer", "not_before", "not_after" (RFC 3339 UTC), "key_type", "key_size", "key_curve", "fingerprint_sha256", "cert_file", "key_file", "loaded_at", "listeners" (`tls`/`wss` from the edge, `admin`), "days_to_expiry" (whole days, truncated toward zero, negative once expired, 0 within a day), "expired", "expiring_soon" (under 30 days, not expired), "disk_differs", "disk_error"}` (`handleTLS`, `tlscert.go`). The leaf is `Certificate[0]`, kept at load by `edge.noteTLSLeaf` (`Server.TLSCert`, wired as `Deps.TLSCert`) and by `Run` for remote admin HTTPS; the edge's wins, as both read the same pair. `disk_differs` re-reads the first certificate of the cert file on each request only (never on a timer). Never the key or PEM |
-| `/api/registrations` | GET (else 405 + `Allow: GET`) | Basic | `?user=&limit=&offset=` (`handleRegistrations`, `state.go:133`): `{"items":[{"aor","user","transport","source" (IP:port),"expires_in" (seconds)}],"total","limit","offset"}`. `user` is a case-insensitive substring of the user part (at most 256 bytes); `limit` defaults to 100 and is clamped to 1000; a `limit` below 1 or non-numeric, a negative or non-numeric `offset` or an over-long `user` is 400. `total` counts the matches. Sorted by AoR, source, transport. Read from `Location.Registrations` (`location.go:404`) under its read lock. No Contact, token or Call-ID |
+| `/api/registrations` | GET (else 405 + `Allow: GET`) | Basic | `?user=&limit=&offset=` (`handleRegistrations`, `state.go:142`): `{"items":[{"aor","user","transport","source" (IP:port),"expires_in" (seconds)}],"total","limit","offset"}`. `user` is a case-insensitive substring of the user part (at most 256 bytes); `limit` defaults to 100 and is clamped to 1000; a `limit` below 1 or non-numeric, a negative or non-numeric `offset` or an over-long `user` is 400. `total` counts the matches. Sorted by AoR, source, transport. Read from `Location.Registrations` (`location.go:423`) under its read lock. No Contact, token or Call-ID |
 | `/api/carrier-registrations` | GET (else 405) | Basic | array of `{"carrier","user","token","node","expires_in"}`; always an array. The switch's live registrations at carriers (`carrierRegTable.snapshot`, `carrierreg.go:312`); `token` is the opaque `fsbc` value in the carrier Contact, `node` the registering switch node |
-| `/api/shield/bans` | GET (else 405) | Basic | `?limit=&offset=` (`handleBans`, `state.go:184`): `{"items":[{"source","kind" ("ip" or "udp_socket"),"reason","since" (RFC 3339),"remaining" (seconds)}],"total","limit","offset","ban_adds_rejected"}`. Both ban tables merged, newest first (`Shield.Bans`, `shield.go:273`); limit and offset as for registrations. `reason` is `scanner` or `register` (rate limiting and enumeration only drop). `ban_adds_rejected` is the cumulative additions refused at the 65536 cap |
+| `/api/shield/bans` | GET (else 405) | Basic | `?limit=&offset=` (`handleBans`, `state.go:193`): `{"items":[{"source","kind" ("ip", "udp_ip" or "udp_socket"),"reason","since" (RFC 3339),"remaining" (seconds)}],"total","limit","offset","ban_adds_rejected"}`. Both ban tables merged, newest first (`Shield.Bans`, `shield.go:287`); limit and offset as for registrations. `reason` is `scanner`, `register` or `admission`; `udp_ip` is an IP banned on UDP only (rate limiting and enumeration only drop). `ban_adds_rejected` is the cumulative additions refused at the 65536 cap |
 | `/api/shield/offenders` | GET (else 405) | Basic | `?limit=` (`handleOffenders`, `state.go`): `{"items":[{"source" (IPv4 address or IPv6 /64),"reason" ("register"),"strikes","since" (RFC 3339, the window opened),"remaining" (seconds of the window)}],"total","limit"}`, most strikes first (`Shield.Offenders`, `offenders.go`); limit default 100, at most 1000 |
 | `/api/switch-nodes` | GET (else 405) | Basic | array of `{"address","state" ("healthy" or "cooling_down"),"cooldown_remaining" (seconds),"last_failure" (RFC 3339 or null)}`; always an array, one per `edge.switch` entry, sorted by address (`cooldownTable.snapshot`, `cooldown.go:76`) |
 | `/api/carriers` | GET (else 405) | Basic | array of `{"name","host","transport","mode" ("literal", "srv", "a" or "" until resolved),"addresses":[{"address","in_use"}],"resolved_at","expires_at" (RFC 3339 or null),"cache_age_seconds" (or null),"failing","last_error"}`; always an array, sorted by name (`carrierDirectory.snapshotInfo`, `carrierdns.go:474`). `in_use` marks the first address, the one the edge sends to. While `failing`, `expires_at` is the next retry and the addresses are the last good set |
@@ -3761,7 +3761,7 @@ rules are in `docs/admin-ui.md`.
 
 The State tab's tables read state the planes record for this purpose, all in
 memory and copied under the owning lock: a ban's reason and start time
-(`banEntry`, `banlist.go:37`; `BanInfo`, `shield.go:254`), a switch node's last
+(`banEntry`, `banlist.go:45`; `BanInfo`, `shield.go:266`), a switch node's last
 penalty time (`cooldownTable.lastFail`, `cooldown.go:24`, set in `Penalize`,
 `cooldown.go:41`), and a carrier's resolution mode and last DNS error
 (`carrierEntry.mode` and `lastErr`, `carrierdns.go:134`, `:137`, set in
@@ -3782,7 +3782,7 @@ on Reload, and after each poll while the tab is visible). A **Config** and an
 
 **Pre-parse read filter.** The edge installs a transport-layer filter that
 runs before the SIP parser, the transaction layer, the connection pool and any
-log (`readFilter`, `edge.go:799`). It enforces a **24 KiB** size cap on every
+log (`readFilter`, `edge.go:942`). It enforces a **24 KiB** size cap on every
 read (`fsip.MaxReadSize`, `internal/sip/readfilter.go:20`, below sipgo's
 32 KiB read buffer so it can fire). A read on the private socket
 (`private.ip:5060`, UDP) is admitted only from a switch node's IP; a request
@@ -3797,7 +3797,7 @@ sipgo treats a filter error as fatal to the whole read loop.
 **Arrival marker.** Trust is keyed on the local socket alone, never on a
 source address. The filter stamps each request that reached the private socket
 from a switch IP with `X-FreeSBC-Arrival: <per-process 128-bit secret>;private`
-in a new byte slice (`stamp`, `arrival.go:76`). `guard` (`edge.go:878`) calls
+in a new byte slice (`stamp`, `arrival.go:76`). `guard` (`edge.go:1031`) calls
 `take` (`arrival.go:160`) first, for every request on every transport: the
 arrival is private only when the first marker header equals the secret
 (constant-time); anything else is public. Every `X-FreeSBC-*` header — the
@@ -3817,12 +3817,27 @@ carrier source. The switch has no clause here: it speaks only on the private
 socket. Anything else is dropped before any response. A REGISTER is dropped
 from a source (IPv4 address or IPv6 /64) that has had 10 distinct AoRs
 rejected 403/404 within 10 minutes (`enumMaxAORs`, `enumWindow`,
-`admission.go:238-239`). A public out-of-dialog SUBSCRIBE or MESSAGE is held to
-the same registration test (`admitPublicOutOfDialog`, `admission.go:130`),
+`admission.go:328-329`). A public out-of-dialog SUBSCRIBE or MESSAGE is held to
+the same registration test (`admitPublicOutOfDialog`, `admission.go:137`),
 but a carrier source is answered 405 rather than admitted. All are silent
 drops keyed on the transport source only, never on From or any identity
 header, and are counted in `freesbc_edge_admission_drops_total` (§7.4, §7.5,
-§7.8a). A public NOTIFY, REFER or MESSAGE that names no dialog or
+§7.8a). Each drop except the enumeration one (a dialog-less BYE or INFO included) is also a strike against its
+source in the shield (`admissionStrike`, `admission.go:205`, called from
+`dropSilently`, `admission.go:181`, with the request's transport): over
+`shield.admission_ban` (default `50/5m`, hot) the source IP is banned for
+`shield.ban` with reason `admission` (§14.1); the ban is UDP-only when the
+strikes came over UDP, all-transport when they came over a stream transport,
+so a scanner that stays under `shield.rate_limit` and
+rotates its source port is cut off before parsing (issue #180). A carrier
+source and any IP holding a registration binding on any port (`Location.HasIP`,
+`location.go:233`, a per-IP binding count) are never struck, and a 2xx
+REGISTER clears the source's admission strikes. A WARN once a minute
+(`dropSummary`, `admission.go`, `admissionSummaryEvery`) summarises the
+drops of that minute (total, number of sources, the top source); the tally
+holds at most `maxSummarySources` (1024) sources, the rest only count in the
+total (a `+` after the source count marks that), and an interval with no
+drops logs nothing. A public NOTIFY, REFER or MESSAGE that names no dialog or
 subscription is answered 481 and never reaches the switch, so a made-up
 To-tag cannot carry it past admission (`indialog.go:505`). Subscription
 records are bounded per registration and in all (§15.1) and a SUBSCRIBE over
@@ -3849,9 +3864,9 @@ port, so unauthenticated carrier traffic cannot reach the switch's
 authenticated profile (§6).
 
 **Shield.** Every read on a public socket is charged in the read filter
-(`AllowRate`, `shield.go:121`, steps 1-2 below as `CheckFrom`, `shield.go:103`,
+(`AllowRate`, `shield.go:128`, steps 1-2 below as `CheckFrom`, `shield.go:110`,
 composes them), and every parsed request then runs through `CheckScanner`
-(`shield.go:137`) in `guard`, which knows the source port: the ban re-check
+(`shield.go:144`) in `guard`, which knows the source port: the ban re-check
 and step 3. The private socket is trusted and bypasses the shield. In order:
 
 1. A banned source is dropped.
@@ -3871,7 +3886,7 @@ and step 3. The private socket is trusted and bypasses the shield. In order:
    - **tcp, tls, ws, wss**: the source IP is banned for `shield.ban`. A
      handshake proved the source address.
    - **udp**: only the exact source socket (IP:port) is banned, in a separate
-     table, for at most **1 minute** (`socketBanMax`, `shield.go:97`). One
+     table, for at most **1 minute** (`socketBanMax`, `shield.go:104`). One
      forged datagram therefore cannot lock out a victim's IP, and a forged
      flood that fills the socket table cannot stop real scanners' IPs from
      being banned.
@@ -3886,28 +3901,43 @@ only.**
 
 **Bans.** A scanner ban lasts `shield.ban` (default 1 h) and lives only in the
 shield's in-memory table, which is capped at **65536** entries (`banCap`,
-`banlist.go:14`) with an overflow counter. A re-ban extends an existing ban to
+`banlist.go:15`) with an overflow counter. A re-ban extends an existing ban to
 the later of the two expiries and never shortens it (P2-SHD-008). Ban keys are
 unmapped IPs, and every lookup unmaps its argument, so `::ffff:192.0.2.1` is
 seen as `192.0.2.1` (P2-SHD-009). A ban also closes the banned source's
 tcp/tls/ws/wss connection: `guard` closes the one the banning request came on,
 and the read filter closes any other on its next read (`closeStream`,
-`edge.go:925`, P2-SHD-006). An idle connection opened before the ban stays open
+`edge.go:1123`, P2-SHD-006). An idle connection opened before the ban stays open
 until it next sends. There is no kernel enforcement and no API that lifts a
 ban.
 
 **Strike bans** (`Shield.Strike`, `offenders.go`). A plane may report a
 source's failures as strikes; over the reason's threshold the source IP is
 banned for `shield.ban` with the reason as the ban reason. The only reason
-today is `register` (`shield.register_ban`, default `10/10m`, hot): a failed
-REGISTER credential attempt (§7.4). Strikes are counted per source key (IPv4
+are `register` (`shield.register_ban`, default `10/10m`, hot): a failed
+REGISTER credential attempt (§7.4); and `admission` (`shield.admission_ban`,
+default `50/5m`, hot): a public request dropped by edge admission (§7.5), a dialog-less BYE or INFO included.
+`Shield.StrikeOn(src, reason, transport)` scopes the ban by transport: a
+strike from UDP is counted under the offender reason `admission_udp` and
+bans the IP in a separate table (`udpBans`, kind `udp_ip`) that only
+`BannedFrom(..., "udp")` consults, so the read filter drops that IP's
+datagrams while its TCP, TLS, WS and WSS accepts and reads go through; a
+strike from tcp, tls, ws or wss is counted under `admission` and bans the IP
+on every transport (`bans`). The counts never add, and a narrower ban never
+replaces a wider one (separate tables). A separate table also keeps a forged
+UDP flood from filling the all-transport table. Strikes are counted per source key (IPv4
 address, IPv6 /64) in a fixed window from the first strike, in an LRU of at
 most 16384 entries (`offenderCap`), so a flood of sources only forgets the
 oldest; a carrier source is never struck; a success clears the count
 (`ClearStrikes`). Strikes on a forgeable transport are the caller's to make
 safe: the REGISTER guard counts only an attempt whose nonce FreeSBC relayed
 to that source in a challenge, so a forged UDP datagram can neither ban a
-victim nor push forged addresses into the ban table (#17). `GET
+victim nor push forged addresses into the ban table (#17). The admission
+strike has no such proof (a dropped request is by definition unanswered),
+so a UDP strike can only ever ban the IP on UDP, and relies on the window
+threshold, the offender cap and the exemptions for carriers and registered
+IPs; a sustained forged flood naming an unregistered, non-carrier address
+can silence it on UDP for `shield.ban`, never on a stream transport. `GET
 /api/shield/offenders` lists the sources with strikes in an open window.
 
 **Every denial is a silent drop.** A scanner never gets confirmation that the
@@ -3925,7 +3955,7 @@ Globally, `shield.max_sessions` caps the calls holding a slot (default: what
 `rtp` can anchor) and `shield.invite_rate_limit` bounds new INVITEs; an
 admitted peer over either gets 503 + `Retry-After` (§7.1).
 The binding table holds at most 20000 bindings and 10 per AoR
-(`defaultMaxBindings`, `defaultMaxPerAOR`, `location.go:78-79`).
+(`defaultMaxBindings`, `defaultMaxPerAOR`, `location.go:89-90`).
 
 **Admin.** One bcrypt Basic-Auth realm over the WebUI, `/metrics` and every
 `/api/*` route, with `/healthz` the only unauthenticated route. bcrypt cost
@@ -4108,16 +4138,16 @@ code constant.
 
 | Timeout | Value | Scope |
 |---|---|---|
-| `rtpSilenceTimeout` | 5 min (`edge.go:130`) | media silence; the only automatic reclaim for a confirmed call whose BYE was lost |
-| `switchCooldown` | 30 s (`edge.go:162`) | a switch node that answered nothing is skipped while alternatives exist |
-| `udpServingTimeout` | 5 s (`edge.go:584`) | startup: every UDP listener pooled by sipgo before `ready` closes (§4) |
+| `rtpSilenceTimeout` | 5 min (`edge.go:161`) | media silence; the only automatic reclaim for a confirmed call whose BYE was lost |
+| `switchCooldown` | 30 s (`edge.go:165`) | a switch node that answered nothing is skipped while alternatives exist |
+| `udpServingTimeout` | 5 s (`edge.go:770`) | startup: every UDP listener pooled by sipgo before `ready` closes (§4) |
 | `streamHandshakeTimeout` | 10 s (`stream.go`) | a new tls/wss connection's TLS handshake, a ws/wss connection's HTTP upgrade request (§7.1a), and the dial plus handshake of a connection FreeSBC opens to a tcp/tls carrier (§6.10) |
 | `streamIdleTimeout` | 60 s | a stream connection silent this long and in no use (no binding, dialog or carrier source) is closed; an in-use one is re-armed |
 | `streamMessageTimeout` | 15 s from the message's first byte | one SIP message or WebSocket frame must arrive complete (slow-loris guard) |
 | `streamWriteTimeout` | 10 s | one write to a stream client |
 | `streamMaxConnsPerIP` / `streamMaxConns` / `streamMaxCarrierConns` | 256 / 10000 / 1024 | open stream connections per source (an IPv6 /64), in all for public sources, and in all to and from carriers (dialed, or accepted from a carrier source), which do not count against the 10000 |
 | `registerTimeout` | 32 s (`register.go:17`) | one whole REGISTER series, client or carrier |
-| `ackTimeout` | 32 s (`edge.go:257`; Timer H) | an answer owed in an ACK that never arrived: the call is ended with a BYE to both sides (§7.9a) |
+| `ackTimeout` | 32 s (`edge.go:303`; Timer H) | an answer owed in an ACK that never arrived: the call is ended with a BYE to both sides (§7.9a) |
 | `sessionCapRetryAfter` | 5 s (`invite.go:160`) | `Retry-After` of a 503 for a full session cap |
 | `drainRetryAfter` | 30 s (`invite.go:156`) | `Retry-After` of a 503 refused because the edge is draining |
 | `capWarnEvery` | 10 s per reason (`invite.go`) | spacing of the session-cap / invite-rate WARN lines |
@@ -4138,11 +4168,12 @@ code constant.
 | `ackMissWarnEvery` | 1 min per plane (`ack.go:22`) | spacing of the missed-ACK WARN lines |
 | `ackTimeout` (`ackBudget`) | 32 s (`edge.go`) | also the wait for a 2xx ACK before `ack_timeout` ends the call (`ack.go`) |
 | `banCapQuiet` | 60 s (`app/health.go:22`) | how long `BanAddsRejected` must stand still before `shield_ban_cap` clears |
-| `shield.ban` | 1 h (config); a UDP socket ban at most 1 min (`socketBanMax`) | a scanner ban, and a `register_ban` ban |
-| shield prune tick | 1 min (`shield.go:239`) | expired bans and idle rate-limit buckets |
-| binding / carrier-registration / subscription prune tick | 30 s (`edge.go:534`, `edge.go:559`) | expired bindings (memory only; lookups already hide them) and expired subscription records |
+| `shield.ban` | 1 h (config); a UDP socket ban at most 1 min (`socketBanMax`) | a scanner ban, a `register_ban` ban and an `admission_ban` ban |
+| shield prune tick | 1 min (`shield.go:249`) | expired bans and idle rate-limit buckets |
+| binding / carrier-registration / subscription prune tick | 30 s (`edge.go:697`, `edge.go:707`) | expired bindings (memory only; lookups already hide them) and expired subscription records |
 | `enumWindow` | 10 min, from a source's first counted rejection | the REGISTER enumeration limit (§7.4) |
 | `shield.register_ban` window | 10 min (config), from a source's first strike | the REGISTER credential guard (§7.4) |
+| `shield.admission_ban` window | 5 min (config), from a source's first admission drop | the admission-drop ban (§7.5, §14.1) |
 | `regNonceTTL` | 15 min (`regguard.go`) | how long a challenge nonce relayed to a source keeps its attempts countable |
 | `regReplayWindow` | 40 s (`regguard.go`) | how long after a challenge a UDP credential retry on the challenged branch counts as a replay sipgo absorbs |
 | `media.LearnDelay` | 3 s (`session.go:69`) | a loose latch keeps sending to a plausible SDP address before switching to another learned port (§8.4) |

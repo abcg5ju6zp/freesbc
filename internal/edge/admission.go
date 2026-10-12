@@ -2,12 +2,14 @@ package edge
 
 import (
 	"container/list"
+	"fmt"
 	"net/netip"
 	"sync"
 	"time"
 
 	"github.com/emiago/sipgo/sip"
 
+	"github.com/freesbc/freesbc/internal/shield"
 	fsip "github.com/freesbc/freesbc/internal/sip"
 )
 
@@ -33,6 +35,11 @@ import (
 // exception is a dialog-less BYE or INFO, which is counted like a drop but
 // answered 481 (as a REFER, MESSAGE or NOTIFY naming no dialog is); a
 // non-INVITE final is never retransmitted by Timer G.
+//
+// Every drop except register_enumeration, the dialog-less BYE/INFO one
+// included, is also a strike against its source for shield.admission_ban
+// (admissionStrike); the ban scope follows the transport of the request:
+// UDP strikes ban the IP on UDP only, stream transports ban every one.
 
 // dropReason is why a public request was dropped by admission. The set is
 // fixed, so it is a bounded metric label.
@@ -155,7 +162,8 @@ func (s *Server) admitDialogless(req *sip.Request, src netip.AddrPort) bool {
 	if kind, _ := s.admitPublicInvite(req, src); kind != srcDrop {
 		return true
 	}
-	// dropSilently only counts and logs; the caller sends the 481.
+	// dropSilently counts, logs and strikes the source (admission_ban,
+	// as for any drop but enumeration); the caller sends the 481.
 	s.dropSilently(dropDialogless, req, src)
 	return false
 }
@@ -168,6 +176,10 @@ func (s *Server) admitDialogless(req *sip.Request, src netip.AddrPort) bool {
 // onInvite).
 func (s *Server) dropSilently(reason dropReason, req *sip.Request, src netip.AddrPort, attrs ...any) {
 	s.metrics.AdmissionDropped(reason)
+	s.dropSummary.add(src.Addr())
+	if reason != dropRegisterEnumeration {
+		s.admissionStrike(src.Addr(), sip.NetworkToLower(req.Transport()))
+	}
 	args := append([]any{
 		"reason", reason.String(),
 		"method", req.Method.String(),
@@ -180,6 +192,84 @@ func (s *Server) dropSilently(reason dropReason, req *sip.Request, src netip.Add
 		return
 	}
 	s.log.Debug("public request dropped by admission", args...)
+}
+
+// admissionStrike counts one admission drop against src in the shield
+// (shield.admission_ban, issue #180): a source that keeps sending requests
+// admission drops, below every rate limit, is eventually banned by IP for
+// shield.ban. It never counts a carrier source or an IP that holds a
+// registration binding on any port (a phone that re-registers from a new
+// port must recover), and the shield counts only after a sustained number
+// of drops in a window, never one datagram. The drop itself is already
+// silent, so the ban only stops the parsing cost.
+func (s *Server) admissionStrike(ip netip.Addr, transport string) {
+	sh := s.currentShield()
+	if sh == nil {
+		return
+	}
+	ip = ip.Unmap()
+	if s.carriers.snapshot().isSource(ip) || s.loc.HasIP(ip) {
+		return
+	}
+	sh.StrikeOn(ip, shield.StrikeAdmission, transport)
+}
+
+// admissionSummaryEvery is the period of the admission-drop summary WARN.
+// An interval with no drops logs nothing.
+const admissionSummaryEvery = time.Minute
+
+// maxSummarySources bounds the per-source counts kept for one summary
+// interval. Sources past it still count in the total, only their per-source
+// count is lost, so memory is bounded however many sources are dropped.
+const maxSummarySources = 1024
+
+// dropSummary counts the admission drops of one interval: the total and a
+// bounded per-source tally, from which the WARN names the top source.
+type dropSummary struct {
+	mu       sync.Mutex
+	total    int
+	bySrc    map[netip.Addr]int
+	overflow bool // some source was not tracked (cap reached)
+}
+
+func (d *dropSummary) add(ip netip.Addr) {
+	ip = ip.Unmap().WithZone("")
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.total++
+	if d.bySrc == nil {
+		d.bySrc = map[netip.Addr]int{}
+	}
+	if _, ok := d.bySrc[ip]; !ok && len(d.bySrc) >= maxSummarySources {
+		d.overflow = true
+		return
+	}
+	d.bySrc[ip]++
+}
+
+// take returns the summary line for the interval just ended and starts a
+// new one; ok is false when there were no drops.
+func (d *dropSummary) take(interval time.Duration) (msg string, ok bool) {
+	d.mu.Lock()
+	total, by, overflow := d.total, d.bySrc, d.overflow
+	d.total, d.bySrc, d.overflow = 0, nil, false
+	d.mu.Unlock()
+	if total == 0 {
+		return "", false
+	}
+	var top netip.Addr
+	topN := 0
+	for ip, n := range by {
+		if n > topN || (n == topN && ip.Less(top)) {
+			top, topN = ip, n
+		}
+	}
+	more := ""
+	if overflow {
+		more = "+"
+	}
+	return fmt.Sprintf("admission drops: %d in %s from %d%s sources, top=%s (%d)",
+		total, interval, len(by), more, top, topN), true
 }
 
 // maxWarnedSources bounds the set of sources already warned about. When

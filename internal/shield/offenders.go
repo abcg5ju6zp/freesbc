@@ -17,6 +17,12 @@ const (
 	// StrikeRegister is a failed REGISTER credential attempt
 	// (shield.register_ban).
 	StrikeRegister = BanReasonRegister
+	// StrikeAdmission is a public request dropped by edge admission
+	// (shield.admission_ban).
+	StrikeAdmission = BanReasonAdmission
+	// StrikeAdmissionUDP is the offender-table reason of admission strikes
+	// from UDP, counted apart from stream ones (see StrikeOn).
+	StrikeAdmissionUDP = StrikeAdmission + "_udp"
 )
 
 // offenderCap bounds the offender table. A flood of distinct sources only
@@ -140,6 +146,21 @@ func (t *offenderTable) live() []offender {
 // trustworthy: a forgeable datagram must not be able to strike a victim's
 // address (see the edge's REGISTER guard).
 func (s *Shield) Strike(src netip.Addr, reason string) bool {
+	return s.strike(src, reason, false)
+}
+
+// StrikeOn is Strike for a request that arrived on transport. A UDP source
+// address can be forged, so strikes from UDP are counted apart from stream
+// strikes (offender reason StrikeAdmissionUDP) and ban the IP on UDP only
+// (BanKindUDPIP): a forged datagram flood can silence the victim's UDP,
+// never its TCP, TLS, WS or WSS. A stream source survived a handshake, so
+// its strikes ban the IP on every transport. An unknown transport is
+// treated as UDP.
+func (s *Shield) StrikeOn(src netip.Addr, reason, transport string) bool {
+	return s.strike(src, reason, !bannableTransport(transport))
+}
+
+func (s *Shield) strike(src netip.Addr, reason string, udp bool) bool {
 	src = src.Unmap()
 	if s.isCarrier(src) {
 		return false
@@ -149,11 +170,15 @@ func (s *Shield) Strike(src netip.Addr, reason string) bool {
 	if lim.Off || lim.N <= 0 || lim.Window <= 0 {
 		return false
 	}
-	count, over, crossed := s.offenders.strike(offenderKey{bucketKey(src), reason}, lim)
+	table, key := s.bans, offenderKey{bucketKey(src), reason}
+	if udp {
+		table, key.reason = s.udpBans, reason+"_udp"
+	}
+	count, over, crossed := s.offenders.strike(key, lim)
 	if !over {
 		return false
 	}
-	if !s.bans.ban(src, cfg.Shield.Ban.Std(), reason) {
+	if !table.ban(src, cfg.Shield.Ban.Std(), reason) {
 		s.log.Debug("shield ban table at hard cap; strike ban refused", "source", src, "reason", reason)
 		return false
 	}
@@ -170,6 +195,9 @@ func (s *Shield) Strike(src netip.Addr, reason string) bool {
 // (a 2xx registration), so its earlier failures were not an attack.
 func (s *Shield) ClearStrikes(src netip.Addr, reason string) {
 	s.offenders.clear(offenderKey{bucketKey(src), reason})
+	if reason == StrikeAdmission {
+		s.offenders.clear(offenderKey{bucketKey(src), StrikeAdmissionUDP})
+	}
 }
 
 // strikeLimit parses reason's threshold from cfg, cached until the string
@@ -179,6 +207,8 @@ func (s *Shield) strikeLimit(cfg *config.Config, reason string) config.StrikeLim
 	switch reason {
 	case StrikeRegister:
 		str = cfg.Shield.RegisterBan
+	case StrikeAdmission:
+		str = cfg.Shield.AdmissionBan
 	default:
 		return config.StrikeLimit{Off: true}
 	}

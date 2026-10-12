@@ -66,6 +66,9 @@ type Location struct {
 	// up, so neither scans the table. One source may hold several bindings
 	// (a phone registering several lines over one socket).
 	bySource map[netip.AddrPort][]*Binding
+	// byIP counts the bindings per source IP (HasIP), so the admission
+	// strike exemption is a map lookup, not a scan.
+	byIP     map[netip.Addr]int
 	maxTotal int
 	// maxPerAOR caps how many devices one user may have registered at
 	// once, so a single compromised account cannot consume the table.
@@ -100,6 +103,7 @@ func NewLocation() *Location {
 		byToken:   map[string]*Binding{},
 		byAOR:     map[string][]*Binding{},
 		bySource:  map[netip.AddrPort][]*Binding{},
+		byIP:      map[netip.Addr]int{},
 		maxTotal:  defaultMaxBindings,
 		maxPerAOR: defaultMaxPerAOR,
 	}
@@ -224,6 +228,14 @@ func (l *Location) HasSource(transport string, src netip.AddrPort) bool {
 	return false
 }
 
+// HasIP reports whether any binding (live, or expired and not yet pruned)
+// was registered from ip on any port or transport.
+func (l *Location) HasIP(ip netip.Addr) bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.byIP[ip.Unmap()] > 0
+}
+
 // SourceBinding returns a live binding registered over transport from
 // exactly src: the one whose User equals user (case-insensitively), else
 // the first live one. ok is false when the source holds none. It is
@@ -253,11 +265,18 @@ func (l *Location) SourceBinding(transport string, src netip.AddrPort, user stri
 // indexSourceLocked adds b to the source index. Caller holds the lock.
 func (l *Location) indexSourceLocked(b *Binding) {
 	l.bySource[b.Source] = append(l.bySource[b.Source], b)
+	l.byIP[b.Source.Addr().Unmap()]++
 }
 
 // unindexSourceLocked removes b from the source index. Caller holds the
 // lock.
 func (l *Location) unindexSourceLocked(b *Binding) {
+	ip := b.Source.Addr().Unmap()
+	if l.byIP[ip] <= 1 {
+		delete(l.byIP, ip)
+	} else {
+		l.byIP[ip]--
+	}
 	list := l.bySource[b.Source]
 	for i, e := range list {
 		if e == b {

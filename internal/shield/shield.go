@@ -31,6 +31,7 @@ type Shield struct {
 	limiter    *rateLimiter             // per-source limit (rate_limit / carrier_rate_limit)
 	bans       *banList[netip.Addr]     // source IPs (connection-oriented verdicts)
 	socketBans *banList[netip.AddrPort] // UDP source sockets (see CheckFrom)
+	udpBans    *banList[netip.Addr]     // source IPs banned on UDP only (see StrikeOn)
 	offenders  *offenderTable           // per-source strike counters (Strike)
 
 	// Cumulative drop counters by reason, for the admin API's metrics
@@ -71,6 +72,7 @@ func New(store *config.Store, log *slog.Logger, isCarrier func(netip.Addr) bool)
 		limiter:    newRateLimiter(),
 		bans:       newBanList(),
 		socketBans: newBanTable[netip.AddrPort](),
+		udpBans:    newBanList(),
 		offenders:  newOffenderTable(),
 		stop:       cancel,
 		done:       make(chan struct{}),
@@ -191,7 +193,10 @@ func (s *Shield) BannedFrom(src netip.AddrPort, transport string) bool {
 	if s.bans.banned(src.Addr()) {
 		return true
 	}
-	return isUDP(transport) && src.Port() != 0 && s.socketBans.banned(src)
+	if !isUDP(transport) {
+		return false
+	}
+	return s.udpBans.banned(src.Addr()) || (src.Port() != 0 && s.socketBans.banned(src))
 }
 
 // Stats is a snapshot of shield activity for metrics.
@@ -206,8 +211,8 @@ type Stats struct {
 // Stats returns a snapshot of current bans and cumulative drops by reason.
 func (s *Shield) Stats() Stats {
 	return Stats{
-		BannedCurrent:   s.bans.size() + s.socketBans.size(),
-		BanAddsRejected: s.bans.overflowed() + s.socketBans.overflowed(),
+		BannedCurrent:   s.bans.size() + s.socketBans.size() + s.udpBans.size(),
+		BanAddsRejected: s.bans.overflowed() + s.socketBans.overflowed() + s.udpBans.overflowed(),
 		DropsByReason: map[string]int64{
 			"banned":  s.dropsBanned.Load(),
 			"scanner": s.dropsScanner.Load(),
@@ -251,6 +256,7 @@ func (s *Shield) pruneLoop(ctx context.Context) {
 			s.limiter.prune()
 			s.bans.prune()
 			s.socketBans.prune()
+			s.udpBans.prune()
 			s.offenders.prune()
 		}
 	}
@@ -260,7 +266,8 @@ func (s *Shield) pruneLoop(ctx context.Context) {
 type BanInfo struct {
 	// Source is the banned IP, or IP:port for a UDP socket ban.
 	Source string
-	// Kind is BanKindIP or BanKindUDPSocket.
+	// Kind is BanKindIP (every transport), BanKindUDPIP (the IP, UDP only)
+	// or BanKindUDPSocket.
 	Kind string
 	// Reason is why the ban was recorded (BanReasonScanner,
 	// BanReasonRegister).
@@ -280,8 +287,11 @@ const maxBanPage = 1000
 func (s *Shield) Bans(limit, offset int) (page []BanInfo, total int) {
 	limit = min(max(limit, 1), maxBanPage)
 	offset = max(offset, 0)
-	ips, socks := s.bans.live(), s.socketBans.live()
-	all := make([]BanInfo, 0, len(ips)+len(socks))
+	ips, socks, udps := s.bans.live(), s.socketBans.live(), s.udpBans.live()
+	all := make([]BanInfo, 0, len(ips)+len(socks)+len(udps))
+	for _, e := range udps {
+		all = append(all, BanInfo{Source: e.key.String(), Kind: BanKindUDPIP, Reason: e.reason, Since: e.since, Until: e.until})
+	}
 	for _, e := range ips {
 		all = append(all, BanInfo{Source: e.key.String(), Kind: BanKindIP, Reason: e.reason, Since: e.since, Until: e.until})
 	}

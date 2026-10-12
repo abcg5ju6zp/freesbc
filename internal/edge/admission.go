@@ -23,10 +23,16 @@ import (
 //     enumMaxAORs distinct AoRs rejected 403/404 by the registrar within
 //     enumWindow (enumLimiter);
 //   - an out-of-dialog MESSAGE (and SUBSCRIBE) on a public listener is
-//     admitted only from a live registration (admitPublicOutOfDialog).
+//     admitted only from a live registration (admitPublicOutOfDialog);
+//   - a public BYE or INFO that names no dialog on record is forwarded to
+//     the switch only from a live registration or a carrier source
+//     (admitDialogless); anyone else is answered 481 and counted.
 //
-// All drops are silent: no response is sent, so a scanner learns nothing
-// and sipgo's Timer G never retransmits a final to a spoofed source.
+// Drops are silent: no response is sent, so a scanner learns nothing and
+// sipgo's Timer G never retransmits a final to a spoofed source. The one
+// exception is a dialog-less BYE or INFO, which is counted like a drop but
+// answered 481 (as a REFER, MESSAGE or NOTIFY naming no dialog is); a
+// non-INVITE final is never retransmitted by Timer G.
 
 // dropReason is why a public request was dropped by admission. The set is
 // fixed, so it is a bounded metric label.
@@ -37,6 +43,7 @@ const (
 	dropRegisterEnumeration
 	dropSubscribeNotAdmitted
 	dropMessageNotAdmitted
+	dropDialogless
 	numDropReasons
 )
 
@@ -46,6 +53,7 @@ var dropReasonLabels = [numDropReasons]string{
 	dropRegisterEnumeration:  "register_enumeration",
 	dropSubscribeNotAdmitted: "subscribe_not_admitted",
 	dropMessageNotAdmitted:   "message_not_admitted",
+	dropDialogless:           "dialogless_not_admitted",
 }
 
 func (r dropReason) String() string { return dropReasonLabels[r] }
@@ -132,6 +140,24 @@ func (s *Server) admitPublicOutOfDialog(req *sip.Request, src netip.AddrPort, re
 	}
 	s.dropSilently(reason, req, src)
 	return Binding{}, oodDropped
+}
+
+// admitDialogless is the admission check of a public BYE or INFO that
+// matches no dialog on record. directionFor would hash such a request to
+// a switch, which is right for a registered client or a carrier whose
+// dialog record is gone (restart, early expiry), but would otherwise let
+// any public sender make the edge deliver a request to the switch and
+// relay its answer. The source must be a live registration (transport +
+// IP:port) or a carrier source, as for an INVITE (admitPublicInvite).
+// Anyone else is counted under dropDialogless and the handler answers 481,
+// the same answer a REFER, MESSAGE or NOTIFY naming no dialog gets.
+func (s *Server) admitDialogless(req *sip.Request, src netip.AddrPort) bool {
+	if kind, _ := s.admitPublicInvite(req, src); kind != srcDrop {
+		return true
+	}
+	// dropSilently only counts and logs; the caller sends the 481.
+	s.dropSilently(dropDialogless, req, src)
+	return false
 }
 
 // dropSilently records an admission drop: it counts it by reason and logs

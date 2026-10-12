@@ -164,7 +164,8 @@ type ProxyStats struct {
 
 	// AdmissionDrops counts public requests the edge admission policy
 	// dropped silently, by reason (a fixed set: invite_not_admitted,
-	// register_enumeration, subscribe_not_admitted, message_not_admitted).
+	// register_enumeration, subscribe_not_admitted, message_not_admitted,
+	// dialogless_not_admitted).
 	AdmissionDrops map[string]uint64 `json:"admission_drops_total"`
 
 	// CallsEnded counts confirmed calls that ended, by reason (a fixed set,

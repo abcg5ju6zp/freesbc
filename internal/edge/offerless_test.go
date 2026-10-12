@@ -410,6 +410,11 @@ func TestOfferlessInviteToClient(t *testing.T) {
 	if got == nil || len(got.Body()) != 0 {
 		t.Fatalf("the phone's INVITE: %v", got)
 	}
+	assertClientRecordRoute(t, "INVITE at the phone", got.GetHeaders("Record-Route"), portOf(h.publicUDP))
+	if len(got.GetHeaders("Route")) != 0 {
+		t.Errorf("INVITE at the phone carries a Route: %v", got.GetHeaders("Route"))
+	}
+	assertSwitchRecordRoute(t, "200 at the switch", res.GetHeaders("Record-Route"), portOf(h.privateSIP))
 	d := waitForDialog(t, h, fsip.CallID(req))
 	sess := d.session()
 	if offer := mustSDP(t, "200 at the switch", res.Body()); offer.Audio.Port != sess.privatePort {

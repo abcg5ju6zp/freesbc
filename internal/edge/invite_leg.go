@@ -159,8 +159,14 @@ func (s *Server) relayInviteResponse(l *inviteLeg, res *sip.Response) error {
 			l.dialog().setForkRoute(tag, s.legRoute(l, res))
 		}
 		fsip.SetContact(out, l.near.uri())
-		if l.resp == respToSwitch && res.StatusCode < 300 {
+		switch {
+		case l.fromPrivate && res.StatusCode < 300:
+			// The switch's route set must start at the private socket, and
+			// neither a carrier nor a client echoes that entry.
 			s.addPrivateRecordRoute(out)
+		case !l.fromPrivate && l.resp == respPlain:
+			// A client never sees the private entry or the switch's own.
+			s.hideRecordRoutesToClient(out)
 		}
 		if len(res.Body()) > 0 || is2xx {
 			body, err := s.forkAnswer(l, res)

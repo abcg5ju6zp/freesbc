@@ -630,6 +630,7 @@ func (s *Server) inviteToClient(req *sip.Request, tx sip.ServerTransaction) {
 	}
 	// The Request-URI FreeSWITCH used names FreeSBC's own contact; the
 	// client must see one addressed to itself.
+	s.hideRoutesToClient(out, to, true)
 	out.Recipient = clientRequestURI(binding)
 	fsip.SetContact(out, to.uri())
 	if offer != nil {

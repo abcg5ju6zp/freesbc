@@ -229,6 +229,33 @@ func sendAck(t *testing.T, c *client, invite *sip.Request, res *sip.Response, de
 	sendAckBranch(t, c, invite, res, dest, sip.GenerateBranchN(16))
 }
 
+// assertClientRecordRoute checks the topology-hiding rule for a message that
+// reaches a public client (issue #166): its Record-Route list is FreeSBC's
+// public entry alone, never the private socket.
+func assertClientRecordRoute(t *testing.T, what string, rrs []sip.Header, publicPort int) {
+	t.Helper()
+	if len(rrs) != 1 {
+		t.Errorf("%s: %d Record-Routes, want only FreeSBC's public one", what, len(rrs))
+	}
+	for _, h := range rrs {
+		if rr := h.(*sip.RecordRouteHeader); rr.Address.Port != publicPort || rr.Address.Host != "127.0.0.1" {
+			t.Errorf("%s: Record-Route %s is not the public entry", what, rr.Address.String())
+		}
+	}
+}
+
+// assertSwitchRecordRoute checks the switch keeps the pair: public then
+// private, so the route set it builds starts at the private socket.
+func assertSwitchRecordRoute(t *testing.T, what string, rrs []sip.Header, privatePort int) {
+	t.Helper()
+	if len(rrs) != 2 {
+		t.Fatalf("%s: %d Record-Routes, want public then private", what, len(rrs))
+	}
+	if last := rrs[1].(*sip.RecordRouteHeader); last.Address.Port != privatePort {
+		t.Errorf("%s: last Record-Route %s is not the private socket", what, last.Address.String())
+	}
+}
+
 // sendAckBranch is sendAck with the ACK's Via branch chosen by the caller.
 func sendAckBranch(t *testing.T, c *client, invite *sip.Request, res *sip.Response, dest, branch string) {
 	t.Helper()
@@ -881,4 +908,47 @@ func waitForDialog(t *testing.T, h *harness, callID string) *dialog {
 	}
 	t.Fatalf("dialog %s was never committed", callID)
 	return nil
+}
+
+// A call from a public client: the switch echoes the whole Record-Route list
+// it received (FreeSBC's private entry among it) and adds its own, yet the
+// client's 2xx carries FreeSBC's public entry alone (issue #166). The route
+// set the client builds from it still carries its BYE to the switch.
+func TestClientCallRecordRouteHidden(t *testing.T) {
+	h := startHarnessStrict(t, false, false) // no carrier_sources: the phone is a client
+	phone := newUDPClient(t)
+	auditRegisterPhone(t, h, phone, "1001")
+	phoneRTP := listenRTP(t, freePort(t))
+	swOwn := sip.Uri{Host: "127.0.0.1", Port: portOf(h.fs.addr), UriParams: sip.NewParams()}
+	swOwn.UriParams.Add("lr", "")
+	h.fs.setInviteHook(func(req *sip.Request, tx sip.ServerTransaction) bool {
+		res := sip.NewResponseFromRequest(req, 200, "OK", []byte(h.fs.answerSDP(req)))
+		res.To().Params.Add("tag", sip.GenerateTagN(12))
+		fsip.RemoveHeaders(res, "Record-Route")
+		for _, rr := range req.GetHeaders("Record-Route") {
+			res.AppendHeader(rr)
+		}
+		res.PrependHeader(&sip.RecordRouteHeader{Address: swOwn})
+		res.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
+		res.AppendHeader(&sip.ContactHeader{Address: sip.Uri{User: "fs", Host: "127.0.0.1", Port: portOf(h.fs.addr)}})
+		_ = tx.Respond(res)
+		return true
+	})
+	invite := phone.buildInvite("1001", "2002", "example.com", phoneOfferSDP(udpPort(phoneRTP)))
+	res := phone.do(t, invite, h.publicUDP)
+	if res.StatusCode != 200 {
+		t.Fatalf("INVITE: got %d, want 200", res.StatusCode)
+	}
+	assertClientRecordRoute(t, "200 at the phone", res.GetHeaders("Record-Route"), portOf(h.publicUDP))
+	sendAck(t, phone, invite, res, h.publicUDP)
+	if ack := h.fs.waitFor(sip.ACK, 1, 3*time.Second); len(ack) != 1 {
+		t.Fatalf("the switch saw %d ACKs, want 1", len(ack))
+	}
+	if bye := phone.do(t, buildBye(phone, invite, res), h.publicUDP); bye.StatusCode != 200 {
+		t.Errorf("BYE: got %d, want 200", bye.StatusCode)
+	}
+	if byes := h.fs.waitFor(sip.BYE, 1, 3*time.Second); len(byes) != 1 {
+		t.Errorf("the switch saw %d BYEs, want 1", len(byes))
+	}
+	waitForRelease(t, h)
 }

@@ -277,6 +277,7 @@ func (s *Server) registerOutcome(in bindingInput, res *sip.Response) {
 	if code/100 == 2 {
 		if sh := s.currentShield(); sh != nil {
 			sh.ClearStrikes(in.source.Addr(), shield.StrikeRegister)
+			sh.ClearStrikes(in.source.Addr(), shield.StrikeAdmission)
 		}
 		return
 	}

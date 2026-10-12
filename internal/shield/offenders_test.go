@@ -187,3 +187,32 @@ func TestOffendersOrderAndPrune(t *testing.T) {
 		t.Errorf("prune left %d", n)
 	}
 }
+
+// Admission strikes have their own threshold (shield.admission_ban) and
+// reason, independent of register_ban.
+func TestStrikeAdmissionOwnThreshold(t *testing.T) {
+	s, store := strikeShield(t, "100/10m", nil)
+	next := *store.Current()
+	next.Shield.AdmissionBan = "2/10m"
+	store.Replace(&next)
+	src := netip.MustParseAddr("198.51.100.20")
+	s.Strike(src, StrikeAdmission)
+	s.Strike(src, StrikeAdmission)
+	if s.Banned(src) {
+		t.Fatal("banned at the admission threshold")
+	}
+	if !s.Strike(src, StrikeAdmission) || !s.Banned(src) {
+		t.Fatal("the strike over shield.admission_ban did not ban")
+	}
+	page, _ := s.Bans(10, 0)
+	if len(page) != 1 || page[0].Reason != BanReasonAdmission {
+		t.Errorf("bans = %+v", page)
+	}
+	other := netip.MustParseAddr("198.51.100.21")
+	for i := 0; i < 5; i++ {
+		s.Strike(other, StrikeRegister)
+	}
+	if s.Banned(other) {
+		t.Error("register strikes were counted against the admission threshold")
+	}
+}

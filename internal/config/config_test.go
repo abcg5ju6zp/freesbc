@@ -223,6 +223,8 @@ func TestValidateErrors(t *testing.T) {
 		{"register ban junk", with("shield: { register_ban: nope }\n"), "shield.register_ban"},
 		{"register ban zero", with("shield: { register_ban: 0/10m }\n"), "shield.register_ban"},
 		{"register ban long window", with("shield: { register_ban: 10/48h }\n"), "shield.register_ban"},
+		{"admission ban junk", with("shield: { admission_ban: nope }\n"), "shield.admission_ban"},
+		{"admission ban zero", with("shield: { admission_ban: 0/5m }\n"), "shield.admission_ban"},
 		{"admin listen", with("admin: { listen: nope, password_hash: " + good + " }\n"), "admin.listen"},
 		{"admin remote without opt-in", with("admin: { listen: 0.0.0.0:8080, password_hash: " + good + " }\n"), "allow_remote"},
 		{"admin no hash", with("admin: { listen: 127.0.0.1:8080 }\n"), "admin.password_hash"},
@@ -441,6 +443,20 @@ func TestShieldSessionLimits(t *testing.T) {
 	}
 	if c := mustParse(t, with("shield: { max_sessions: 3 }\n")); c.Shield.MaxSessions != 3 {
 		t.Errorf("max_sessions = %d, want 3", c.Shield.MaxSessions)
+	}
+}
+
+// shield.admission_ban defaults to DefaultAdmissionBan, takes an explicit
+// threshold and accepts "off".
+func TestShieldAdmissionBan(t *testing.T) {
+	if c := mustParse(t, with("")); c.Shield.AdmissionBan != DefaultAdmissionBan {
+		t.Errorf("admission_ban default = %q, want %q", c.Shield.AdmissionBan, DefaultAdmissionBan)
+	}
+	if c := mustParse(t, with("shield: { admission_ban: 5/1m }\n")); c.Shield.AdmissionBan != "5/1m" {
+		t.Errorf("admission_ban = %q, want 5/1m", c.Shield.AdmissionBan)
+	}
+	if c := mustParse(t, with("shield: { admission_ban: \"off\" }\n")); c.Shield.AdmissionBan != "off" {
+		t.Errorf("admission_ban = %q, want off", c.Shield.AdmissionBan)
 	}
 }
 

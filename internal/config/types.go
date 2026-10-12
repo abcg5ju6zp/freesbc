@@ -137,6 +137,9 @@ type StrikeLimit struct {
 // DefaultRegisterBan is shield.register_ban when the key is unset.
 const DefaultRegisterBan = "10/10m"
 
+// DefaultAdmissionBan is shield.admission_ban when the key is unset.
+const DefaultAdmissionBan = "50/5m"
+
 // Bounds of a strike threshold: a window longer than a day, or a count
 // beyond maxStrikeN, is a typo rather than a policy.
 const (

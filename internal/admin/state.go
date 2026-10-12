@@ -33,7 +33,7 @@ type CarrierRegistration struct {
 // Ban is one live shield ban.
 type Ban struct {
 	Source string // IP, or IP:port for a UDP socket ban
-	Kind   string // "ip" or "udp_socket"
+	Kind   string // "ip", "udp_ip" or "udp_socket"
 	Reason string // "scanner" or "register"
 	Since  time.Time
 	Until  time.Time

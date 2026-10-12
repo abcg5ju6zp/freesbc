@@ -212,6 +212,11 @@ type ShieldConfig struct {
 	// attempts pass a threshold ("<n>/<window>", e.g. "10/10m"), or "off".
 	// Default "10/10m". Hot.
 	RegisterBan string `yaml:"register_ban"`
+	// AdmissionBan bans a public source whose requests admission keeps
+	// dropping (out-of-dialog INVITE, SUBSCRIBE or MESSAGE from a source that
+	// is neither a carrier nor registered) past a threshold ("<n>/<window>",
+	// e.g. "50/5m"), or "off". Default "50/5m". Hot.
+	AdmissionBan string `yaml:"admission_ban"`
 }
 
 type AdminConfig struct {
@@ -265,6 +270,9 @@ func withDefaults(c *Config) {
 	}
 	if c.Shield.RegisterBan == "" {
 		c.Shield.RegisterBan = DefaultRegisterBan
+	}
+	if c.Shield.AdmissionBan == "" {
+		c.Shield.AdmissionBan = DefaultAdmissionBan
 	}
 }
 

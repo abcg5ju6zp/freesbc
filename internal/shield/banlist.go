@@ -27,12 +27,18 @@ const sweepEvery = time.Second
 const (
 	BanReasonScanner  = "scanner"
 	BanReasonRegister = "register"
+	// BanReasonAdmission is a source whose requests admission kept
+	// dropping (shield.admission_ban).
+	BanReasonAdmission = "admission"
 )
 
 // Ban kinds: which of the two tables an entry lives in.
 const (
 	BanKindIP        = "ip"
 	BanKindUDPSocket = "udp_socket"
+	// BanKindUDPIP bans an IP on UDP only: its TCP, TLS, WS and WSS
+	// connections and reads are unaffected (see Shield.StrikeOn).
+	BanKindUDPIP = "udp_ip"
 )
 
 // banEntry is one ban: when it expires, when it was first recorded and why.

@@ -140,7 +140,10 @@ type Server struct {
 	// dropWarned limits admission-drop WARNs to one per source IP and
 	// reason; enumLimit is the REGISTER enumeration limit (admission.go).
 	dropWarned *warnOnce
-	enumLimit  *enumLimiter
+	// dropSummary accumulates admission drops between two summary WARNs
+	// (admissionSummaryEvery).
+	dropSummary *dropSummary
+	enumLimit   *enumLimiter
 	// regGuard remembers the challenges relayed to public REGISTER
 	// sources, so failed credential attempts can be struck (regguard.go).
 	regGuard *regGuard
@@ -246,6 +249,7 @@ func New(store *config.Store, log *slog.Logger, opts ...Option) (*Server, error)
 		ready:            make(chan struct{}),
 		early:            map[netip.Addr]int{},
 		dropWarned:       newWarnOnce(maxWarnedSources),
+		dropSummary:      &dropSummary{},
 		enumLimit:        newEnumLimiter(),
 		regGuard:         newRegGuard(),
 		inviteLimiter:    shield.NewLimiter(),
@@ -680,6 +684,7 @@ func (s *Server) Run(ctx context.Context) error {
 		"max_sessions", s.sessionLimit(s.store.Current()),
 		"invite_rate_limit", s.store.Current().Shield.InviteRateLimit,
 		"register_ban", s.store.Current().Shield.RegisterBan,
+		"admission_ban", s.store.Current().Shield.AdmissionBan,
 		"webrtc", s.webrtcEnabled)
 
 	close(s.ready)
@@ -706,6 +711,24 @@ func (s *Server) Run(ctx context.Context) error {
 					s.log.Debug("pruned expired carrier registrations", "count", n)
 				}
 				s.publishCarrierRegistrations()
+			}
+		}
+	}()
+
+	// One WARN a minute summarising the admission drops of that minute.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(admissionSummaryEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-listenCtx.Done():
+				return
+			case <-t.C:
+				if msg, ok := s.dropSummary.take(admissionSummaryEvery); ok {
+					s.log.Warn(msg)
+				}
 			}
 		}
 	}()

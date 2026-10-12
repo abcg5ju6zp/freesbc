@@ -35,7 +35,15 @@ type ackOwed struct {
 	// counted is set once the miss was counted, so one transaction never
 	// counts twice.
 	counted bool
+	// cleared is closed when the ACK arrives (clearAck).
+	cleared chan struct{}
 }
+
+// byeAckGrace is how long a BYE from the 2xx sender waits for the ACK it is
+// owed before the missing ACK is held against the far end. The caller's ACK
+// (public side) and the callee's BYE (private side) are independent flows
+// that can cross, so a BYE seen first is not proof that the ACK is lost.
+const byeAckGrace = 500 * time.Millisecond
 
 // armAckTimer records that the dialog's caller owes the ACK for the 2xx
 // just relayed and starts the backstop. An offerless exchange carries its
@@ -47,7 +55,7 @@ func (s *Server) armAckTimer(d *dialog, cseq uint32) {
 	if d.state != dialogConfirmed {
 		return
 	}
-	a := &ackOwed{plane: d.callerPlane, cseq: cseq}
+	a := &ackOwed{plane: d.callerPlane, cseq: cseq, cleared: make(chan struct{})}
 	d.ack = a
 	if d.owed == nil {
 		a.timer = time.AfterFunc(s.ackBudget(), func() { s.ackExpired(d, a) })
@@ -76,7 +84,30 @@ func (d *dialog) clearAck(p plane, cseq uint32) {
 		if a.timer != nil {
 			a.timer.Stop()
 		}
+		close(a.cleared)
 		d.ack = nil
+	}
+}
+
+// ackOwedAfterGrace reports whether the ACK owed by the plane other than
+// from is still missing after byeAckGrace. A crossing ACK that lands within
+// the grace clears the debt and the BYE is classified as an ordinary hangup.
+func (d *dialog) ackOwedAfterGrace(from plane, grace time.Duration) bool {
+	d.tab.mu.Lock()
+	a := d.ack
+	if a == nil || a.plane == from {
+		d.tab.mu.Unlock()
+		return false
+	}
+	cleared := a.cleared
+	d.tab.mu.Unlock()
+	t := time.NewTimer(grace)
+	defer t.Stop()
+	select {
+	case <-cleared:
+		return false
+	case <-t.C:
+		return d.ackOwedByOther(from)
 	}
 }
 

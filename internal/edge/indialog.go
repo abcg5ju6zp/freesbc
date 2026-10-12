@@ -689,7 +689,7 @@ func (s *Server) onInDialog(req *sip.Request, tx sip.ServerTransaction, in inbou
 			why, by = endByeCaller, byCaller
 		}
 		switch {
-		case d.ackOwedByOther(from.plane):
+		case d.ackOwedAfterGrace(from.plane, byeAckGrace):
 			// The 2xx sender hangs up before the ACK it is owed: it gave
 			// up on the ACK (RFC 3261 §15 allows no other BYE here). Checked
 			// before err, because a caller that never ACKed often never

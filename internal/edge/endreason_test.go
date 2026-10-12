@@ -262,10 +262,14 @@ func TestEndReasonReinviteRefused(t *testing.T) {
 	h.fs.waitFor(sip.ACK, 1, 3*time.Second)
 	auditPhoneReInvite(t, h, phone, invite, res, 2, phoneOfferSDP(auditUDPPort(phoneRTP)))
 	assertEnded(t, h, rec, fsip.CallID(invite), endReinviteRefused, false, true)
+	// end() logs "call ended" before byeBothEnds logs its line, so the
+	// second one may trail the first by a moment.
 	found := false
-	for _, r := range rec.snapshot() {
-		if r.msg == "ending the call; sending BYE to both ends" && r.attrs["reason"] == "reinvite_refused" {
-			found = true
+	for deadline := time.Now().Add(3 * time.Second); !found && time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		for _, r := range rec.snapshot() {
+			if r.msg == "ending the call; sending BYE to both ends" && r.attrs["reason"] == "reinvite_refused" {
+				found = true
+			}
 		}
 	}
 	if !found {

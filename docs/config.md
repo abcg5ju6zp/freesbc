@@ -111,7 +111,7 @@ The DTLS identity for WebRTC media is a per-process self-signed certificate gene
 
 The switch nodes, as literal `IP:port` over UDP (no DNS: a host name is a validation error). Rules: each entry is a valid IP with port 1-65535, not unspecified, not repeated, and not FreeSBC's own private socket `private.ip:5060`.
 
-One entry is a single upstream. More than one is a pool: a request is hashed to a node by FNV-1a 64 over the lower-cased user part, and a node that answered nothing is skipped for 30 s (passive cooldown). The nodes must share a registration store. A node is named by its `IP:port` in logs and metrics.
+One entry is a single upstream. More than one is a pool: a request is hashed to a node by FNV-1a 64 over the lower-cased user part, and a node that answered nothing is skipped for 30 s (passive cooldown), and after 3 unanswered REGISTERs in a row it is not dialed for REGISTER at all (30 s, 1 m, then 5 m; constants, see `docs/edge.md`). The nodes must share a registration store. A node is named by its `IP:port` in logs and metrics.
 
 A carrier registration, and the calls delivered to it, stay on the node that registered.
 
@@ -278,6 +278,7 @@ Not configurable. They live in code until there is a concrete need to tune one.
 | Session-cap and invite-rate WARN spacing | 10 s per reason | `capWarnEvery`, `internal/edge/invite.go` |
 | RTP silence teardown | 5 min | `rtpSilenceTimeout`, `internal/edge/edge.go` |
 | Switch node cooldown | 30 s | `switchCooldown`, `internal/edge/edge.go` |
+| Switch node REGISTER breaker | 3 unanswered, then 30 s / 1 m / 5 m | `registerBreakerThreshold`, `registerBreakerBackoff`, `internal/edge/cooldown.go` |
 | Carrier DNS cache | 300 s (10 s for a failed or empty lookup) | `carrierDNSTTL`, `carrierDNSNegTTL`, `internal/edge/carrierdns.go` |
 | Carrier DNS lookup timeout | 3 s | `carrierLookupTimeout`, `internal/edge/carrierdns.go` |
 | Admin user name | `admin` | `config.AdminUser` |

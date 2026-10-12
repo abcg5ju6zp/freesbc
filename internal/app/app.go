@@ -224,6 +224,8 @@ func adminDeps(edgeSrv *edge.Server, version string, running *config.Config, sto
 				RegistrationTotal:      s.RegistrationTotal,
 				RegistrationFailure:    s.RegistrationFailure,
 				RegisterAuthFailures:   s.RegisterAuthFailures,
+				RegisterUnanswered:     s.RegisterUnanswered,
+				RegisterBreakerRejects: s.RegisterBreakerRejects,
 				RequestsIn:             s.RequestsIn,
 				ResponsesOut:           s.ResponsesOut,
 				RTPPacketsRx:           s.RTPPacketsRx,

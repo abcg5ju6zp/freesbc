@@ -1139,8 +1139,19 @@ Per REGISTER:
    call.
 5. Walk `upstreamOrder(user)` (`register.go:104`) under the single shared
    budget. A node that answered nothing is penalized for the constant
-   `switchCooldown` (30 s, `edge.go:134`), so the phone's next REGISTER skips
-   it.
+   `switchCooldown` (30 s, `edge.go:162`), so the phone's next REGISTER skips
+   it in the dial order, and the attempt feeds the node's REGISTER circuit
+   breaker (`cooldownTable.RegisterUnanswered`, `cooldown.go:108`): after
+   `registerBreakerThreshold` (3) consecutive unanswered attempts the breaker
+   opens and `RegisterAllow` (`cooldown.go:71`, checked at `register.go:131`)
+   refuses the node, so it is not dialed at all, for 30 s, then 1 m, then 5 m
+   on each failed probe. Past the window one probe is admitted at a time; any
+   response (a 401 included) closes the breaker and resets the backoff. When
+   every node is refused, the edge answers 503 + `Retry-After: 30` itself
+   (`register.go:212-221`, `freesbc_edge_register_breaker_rejects_total`).
+   Alternatives are still tried first; the breaker only stops the retry of a
+   dead node. The WARN is limited to one per node per 30 s plus one at each
+   opening (`registerUnanswered`, `register.go:25`).
 
 Per attempt: `prepareForward(..., recordRoute=false)`; replace the Contact
 with `registeredContact(user, token)` (a wildcard is forwarded as `*`, see
@@ -1316,7 +1327,10 @@ user instead, the DID (`carrierHashUser`, `carrier.go:126`).
 `cooldownTable` (`internal/edge/cooldown.go`) is keyed by **name, never by
 address** (the node's `IP:port`): `Available` is a lazy
 expiry check with no sweeper, `Penalize` sets `now + switchCooldown` (30 s), `Recover`
-deletes. There is deliberately **no active probing** — no OPTIONS keepalive —
+deletes. The same table holds the REGISTER circuit breaker (§7.4 step 5):
+unlike the cooldown, which only reorders, an open breaker stops REGISTERs
+being dialed to the node. It is REGISTER-only; the INVITE path keeps the
+cooldown alone. There is deliberately **no active probing** — no OPTIONS keepalive —
 because a carrier's edge would drop or penalize unsolicited health checks.
 
 INVITE failover to the next upstream node happens when the INVITE could not
@@ -2202,7 +2216,7 @@ The classification lives in the loop of `inviteToUpstream`
   so a second attempt would apply a second answer. A transaction that ended
   without a transport error (the shared budget, a node that went quiet
   after answering) is not something another node fixes either.
-  A failed node is penalized for `switchCooldown` (30 s, `edge.go:134`) and
+  A failed node is penalized for `switchCooldown` (30 s, `edge.go:162`) and
   the next in hash order is tried (§7.6).
 - A **carrier → switch call pinned to a registration** has exactly one node
   in its order, so a failure is the end of the series.
@@ -3162,7 +3176,7 @@ If the forward fails, FreeSBC makes one stateless re-send attempt and answers
 | **carrier directory** (`carrierSnapshot`) | `carrierDirectory` (`carrierdns.go:116`) | `newCarrierDirectory` in `edge.New`; refreshed by `Run`'s goroutine | resolved set replaced whole on each refresh; a failed refresh keeps the last good set | name → addresses (SRV or A/AAAA, `carrierDNSTTL` 300 s, failed lookup retried after 10 s, 3 s per query: `carrierdns.go:40-47`) plus the carrier source prefixes; read lock-free by every request | the refresh goroutine only | process exit | `atomic.Pointer[carrierSnapshot]` for readers; `carrierDirectory.mu` guards its cache; `refresh` takes it only to read and to record an outcome (`apply`), never across a lookup, and only the refresh goroutine runs lookups, so `rand.Rand` is unshared |
 | **edge dialog** (`*edge.dialog`) | `dialogTable` (`dialog.go:322`) | `begin(req, callerPlane, limit)` (`dialog.go:380`); a second early record with the same Call-ID and caller tag is refused (482, `invite.go:239`) | `dialogEarly → dialogConfirmed → dialogEnded` (or early → ended) (`dialog.go:20-36`) | matched on Call-ID + both tags; per-fork answers while early; **one media session per record**; `confirm` (before the 2xx is relayed) refuses without media; `end` removes exactly this record; a carrier dialog also records the carrier name (`setCarrier`, `dialog.go:682`) and its far-end address on the node's carrier port | any handler goroutine, via the table's methods; the Timer M hook | tag-matched BYE the far end did not refuse, media watchdog, `endUnlessUp`, `closeAll` | `dialogTable.mu` guards the map, the `closed` flag **and every mutable field of every dialog**; `confirm`/`end` drop the lock before metrics and `sess.Close()` |
 | **edge inviteAttempt** | the dialog's `inFlight` slot | `d.track(...)` per attempt, **before** the INVITE is sent | tracked → `markSent` → overwritten by the next attempt → taken by `cancelSeries` or cleared by `untrack` | holds the request **as forwarded**, the **series** cancel, and `sent`/`cancelled`; a CANCEL finds the record by Call-ID + From tag; `cancelSeries` guarantees exactly one canceller and never lets a CANCEL overtake its INVITE | handler goroutines through `track`/`markSent`/`untrack`; the OnCancel hook and the backstop through `cancelSeries` | `defer d.untrack()` on handler return; `cancelSeries` on CANCEL or backstop | `dialogTable.mu` |
-| **switch cooldown** | one `cooldownTable` on `Server` (`cooldown.go:20`) | `edge.New` | absent ⇄ `until[name]` | keyed by the node's `IP:port` name, never by anything a client supplies; all-cooling falls back to dialling everything; `switchCooldown` = 30 s (`edge.go:134`) | handler goroutines only | `Recover` on any final response; lazy expiry otherwise | `cooldownTable.mu` |
+| **switch cooldown** | one `cooldownTable` on `Server` (`cooldown.go:19`), which also holds the per-node REGISTER breaker `reg[name]` (closed ⇄ open ⇄ half-open probe) | `edge.New` | absent ⇄ `until[name]` | keyed by the node's `IP:port` name, never by anything a client supplies; all-cooling falls back to dialling everything; `switchCooldown` = 30 s (`edge.go:162`) | handler goroutines only | `Recover` on any final response; lazy expiry otherwise | `cooldownTable.mu` |
 | **media Session** | the dialog that allocated it | `media.AllocateAcross(pubPool, privPool, …)` (`media/session.go:355`) | `sessAllocated → sessRunning → sessClosed` (`session.go:336`) | forward-only; `Start` starts the relay at most once; `Close` is idempotent and safe from any goroutine; an unstarted session has **no watchdog** | `SetRemote`, `SetExpectedRemote`, `SetSignallingSource`, `Relatch` from the signalling goroutine; `Close` from anywhere | `dialog.end()`, the watchdog, `recoverRelayPanic` | `state atomic.Int32` (CAS/Swap), `lastRx [2]atomic.Int64` (one per sending side), per-latch `mu` |
 | **port allocation** | `PlanePool.inUse` (`media/portpool.go:73`) | `allocatePair` / `allocateSingle` | reserved → released | RTP even, RTCP = RTP+1; a muxed WebRTC socket still reserves the odd port; a partial `AllocateAcross` releases side A; the public and private pools share the `rtp` range but bind different IPs, so they never collide | the pool only | `Session.Close`, `WebRTCSession.Close`, `WebRTCLeg.Close`, the `AllocateAcross` failure path | `PlanePool.mu`, held only to reserve a candidate; binds run outside it |
 | **SRTP context** | one direction of one browser leg | `newSRTPContextFromKeys` after the DTLS handshake (`media/srtp.go:254`, `webrtcleg.go:607`) | installed once → dropped with the leg | keys come only from DTLS-SRTP key export and are never copied across legs; replay windows 64 (SRTP) / 128 (SRTCP) per context | the leg's `deriveSRTP`, exactly once | dropped with the leg | `SRTPContext.mu` serialising pion's lockless context; the leg holds the pair under `WebRTCLeg.mu` |
@@ -3468,6 +3482,8 @@ permanent series per call."
 | `freesbc_edge_stream_connections` | Gauge | `transport` ∈ {`tcp`, `tls`, `ws`, `wss`} | open public stream connections, moved by `streamConn` open and close (§7.1a); every transport is always exported |
 | `freesbc_edge_stream_refused_total` | Counter | `reason` ∈ {`global_cap`, `ip_cap`, `banned`, `rate`} | connections refused at accept (§7.1a); every reason is always exported |
 | `freesbc_edge_stream_closed_total` | Counter | `reason` ∈ {`idle`, `slow`, `oversize`, `malformed`, `handshake`, `rate`} | connections closed by stream policy (§7.1a); every reason is always exported |
+| `freesbc_edge_register_unanswered_total` | Counter | — | edge `registerUnanswered` (`register.go:25`): one per REGISTER attempt a switch node answered with nothing (a silent node or a transport error); no node label |
+| `freesbc_edge_register_breaker_rejects_total` | Counter | — | edge `RegisterBreakerRejected`: one per client REGISTER answered 503 + `Retry-After: 30` without dialing because every node's REGISTER breaker was open (§7.4) |
 | `freesbc_edge_register_auth_failures_total` | Counter | — | edge `registerStrike` (`regguard.go`): one per failed REGISTER credential attempt struck against its source (§7.4), replays counted in the read filter included. No `source` label: the sources are in `GET /api/shield/offenders` |
 | `freesbc_edge_admission_drops_total` | Counter | `reason` ∈ {`invite_not_admitted`, `register_enumeration`, `subscribe_not_admitted`, `message_not_admitted`} | edge `dropSilently` (`admission.go:141`): a public out-of-dialog INVITE refused by admission (§7.5), a REGISTER from a source over the enumeration limit (§7.4), an out-of-dialog SUBSCRIBE or MESSAGE from a source without a live registration (§7.8a); every reason is always exported |
 | `freesbc_edge_calls_ended_total` | Counter | `reason` ∈ {`bye_caller`, `bye_callee`, `bye_unanswered`, `rtp_silence`, `dtls_failure`, `reinvite_refused`, `answer_timeout`, `answer_unusable`, `media_fault`, `shutdown`, `ack_timeout`} | edge `dialog.end` (`dialog.go:1144`), one per confirmed call that ended, by the reason of the `end` that won (§7.7); every reason is always exported |
@@ -3491,7 +3507,7 @@ There is no config-reload metric and no carrier DNS metric.
 | Level | Examples |
 |---|---|
 | `Error` | `"proxy handler panic"` (+ stack); `"registration binding rejected"`; `"rejecting call: media ports exhausted"`; media relay panic (`"media relay panic; killing session"`); `"admin handler panic"` (+ stack); `"config watcher error"`, `"config reload failed, keeping previous config"`; `"config watcher exited"`, `"edge proxy exited"`, `"admin server exited"` |
-| `Warn` | `"config reload changes restart-only settings; …"`; `"config written via admin API"`; `shield banned scanner`; `shield banned source for repeated failures` (once per source key and window, §14.1); `"public request dropped by admission; …"` (the first drop per source IP and reason, remembered in a FIFO set capped at 4096, `maxWarnedSources`, `admission.go:116`); `"REGISTER enumeration limit reached; …"`; `"rejecting call: too many unanswered calls from one source"`; `"upstream INVITE unanswered; entering cooldown"` / `"upstream REGISTER unanswered; entering cooldown"`; `"forward INVITE upstream"` / `"forward INVITE to client"` / `"forward INVITE to carrier"` / `"forward carrier REGISTER"` failures; `"carrier has no resolved address"`; `"carrier DNS lookup failed; keeping the last good addresses"`; `"carrier request names an unknown or expired registration token; …"`; `"2xx ACK never arrived; …"` (the first miss per plane, then at most one per minute, with `suppressed`); `"webrtc leg failed"`; the fingerprint-mismatch teardown; `"rejecting call to WebSocket client: …"` (a WebSocket client with no ws/wss listener cannot be offered DTLS-SRTP) |
+| `Warn` | `"config reload changes restart-only settings; …"`; `"config written via admin API"`; `shield banned scanner`; `shield banned source for repeated failures` (once per source key and window, §14.1); `"public request dropped by admission; …"` (the first drop per source IP and reason, remembered in a FIFO set capped at 4096, `maxWarnedSources`, `admission.go:116`); `"REGISTER enumeration limit reached; …"`; `"rejecting call: too many unanswered calls from one source"`; `"upstream INVITE unanswered; entering cooldown"` / `"upstream REGISTER unanswered; entering cooldown"` / `"upstream REGISTER unanswered; breaker open, REGISTERs not dialed"` (at most one per node per 30 s, plus one at each breaker opening); `"forward INVITE upstream"` / `"forward INVITE to client"` / `"forward INVITE to carrier"` / `"forward carrier REGISTER"` failures; `"carrier has no resolved address"`; `"carrier DNS lookup failed; keeping the last good addresses"`; `"carrier request names an unknown or expired registration token; …"`; `"2xx ACK never arrived; …"` (the first miss per plane, then at most one per minute, with `suppressed`); `"webrtc leg failed"`; the fingerprint-mismatch teardown; `"rejecting call to WebSocket client: …"` (a WebSocket client with no ws/wss listener cannot be offered DTLS-SRTP) |
 | `Info` | `"edge proxy listening"`, `"media planes ready"`, `"freesbc started"`, `"shutting down"`, `"admin server listening"`, `"config reloaded"`; `"proxying INVITE upstream"` / `"proxying INVITE to client"` / `"proxying INVITE to carrier"`; `"carrier registration"` with the granted expiry; `"carrier resolved"`; `"registration accepted"` / `"removed"` / `"rejected"`; `"webrtc media established"`; `"rejecting call: media not negotiable"`; `"ending the call; sending BYE to both ends"` with the `reason`; `"call ended"` with `reason`, `terminated_by`, `duration`, `webrtc`, `carrier` and media stats |
 | `Debug` | dialog ACK/BYE bookkeeping; `"2xx ACK never arrived"` for every miss; shield rate-limit drops and scanner-datagram drops; edge `"public request dropped by admission"` after the first per source; `"in-dialog request without a dialog record; hashing upstream"` and its carrier variant; `"pruned expired registration bindings"` / `"pruned expired carrier registrations"`; `"carrier DNS lookup still failing"`; `"forward carrier OPTIONS"`; dropped unroutable responses |
 
@@ -4073,6 +4089,7 @@ be used to read an environment variable.
 | Subscription record | a terminated NOTIFY, a 481, a non-2xx final to the first SUBSCRIBE, removal of its registration binding (`Location` hook), `subTable.prune` on the 30 s ticker, `closeAll` at shutdown | 32 per binding, 20000 in all (503 + `Retry-After: 30` beyond); deadline granted `Expires` + 32 s |
 | Carrier registration | a 2xx to the switch's `Expires: 0` REGISTER, expiry + the 30 s prune ticker (`carrierRegTable.prune`, `carrierreg.go:92`) | the expiry the carrier granted in its 200 |
 | Switch node cooldown | `Recover` on any final response, or lazy expiry | `switchCooldown` (30 s) |
+| Switch node REGISTER breaker | `RegisterAnswered` on any response; open for `registerBreakerBackoff` (30 s, 1 m, 5 m) after 3 consecutive unanswered attempts, one half-open probe at a time | `registerBreakerThreshold`, `registerBreakerBackoff` (`cooldown.go`) |
 | Carrier DNS entry | refreshed when its cache window passes; a failed refresh keeps the last good set | 300 s, or 10 s after a failure |
 | WebRTC leg | `WebRTCSession.Close`, establishment failure, fingerprint mismatch | the establishment deadline (30 s) |
 | Shield ban | lazy expiry on lookup, the 1-minute prune tick, process exit | `shield.ban` (default 1 h); a UDP socket ban at most 1 min |
@@ -4087,7 +4104,7 @@ code constant.
 | Timeout | Value | Scope |
 |---|---|---|
 | `rtpSilenceTimeout` | 5 min (`edge.go:130`) | media silence; the only automatic reclaim for a confirmed call whose BYE was lost |
-| `switchCooldown` | 30 s (`edge.go:134`) | a switch node that answered nothing is skipped while alternatives exist |
+| `switchCooldown` | 30 s (`edge.go:162`) | a switch node that answered nothing is skipped while alternatives exist |
 | `udpServingTimeout` | 5 s (`edge.go:584`) | startup: every UDP listener pooled by sipgo before `ready` closes (§4) |
 | `streamHandshakeTimeout` | 10 s (`stream.go`) | a new tls/wss connection's TLS handshake, a ws/wss connection's HTTP upgrade request (§7.1a), and the dial plus handshake of a connection FreeSBC opens to a tcp/tls carrier (§6.10) |
 | `streamIdleTimeout` | 60 s | a stream connection silent this long and in no use (no binding, dialog or carrier source) is closed; an in-use one is re-armed |

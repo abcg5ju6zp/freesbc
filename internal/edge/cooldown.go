@@ -22,10 +22,120 @@ type cooldownTable struct {
 	// lastFail is when each name was last Penalized. Recover clears the
 	// cooldown but keeps this, so an operator still sees the last failure.
 	lastFail map[string]time.Time
+	// reg is the per-node REGISTER circuit breaker (see regBreaker).
+	reg map[string]*regBreaker
 }
 
 func newCooldownTable() *cooldownTable {
-	return &cooldownTable{until: make(map[string]time.Time), lastFail: make(map[string]time.Time)}
+	return &cooldownTable{
+		until:    make(map[string]time.Time),
+		lastFail: make(map[string]time.Time),
+		reg:      make(map[string]*regBreaker),
+	}
+}
+
+// regBreaker is one node's REGISTER circuit breaker. After
+// registerBreakerThreshold consecutive unanswered REGISTER attempts it
+// opens: until openUntil the node is not dialed for a REGISTER at all.
+// Once that passes it is half-open and admits one probe at a time; any
+// answer closes it, another silence re-opens it with a longer window
+// (registerBreakerBackoff). Unlike the cooldown, which only reorders, an
+// open breaker stops the dialing.
+type regBreaker struct {
+	fails     int       // consecutive unanswered attempts
+	level     int       // index into registerBreakerBackoff of the next open
+	open      bool      // opened and not yet closed by an answer
+	openUntil time.Time // no dial before this
+	probeBy   time.Time // a half-open probe is in flight until this
+	lastWarn  time.Time // last unanswered WARN logged for the node
+}
+
+const (
+	// registerBreakerThreshold is how many consecutive unanswered REGISTER
+	// attempts open a node's breaker.
+	registerBreakerThreshold = 3
+	// registerWarnWindow bounds the unanswered-REGISTER WARN to one per
+	// node per window.
+	registerWarnWindow = 30 * time.Second
+)
+
+// registerBreakerBackoff is the open window per consecutive opening: 30 s,
+// 1 m, then 5 m.
+var registerBreakerBackoff = [...]time.Duration{30 * time.Second, time.Minute, 5 * time.Minute}
+
+// RegisterAllow reports whether a REGISTER may be dialed to the node now.
+// A closed breaker always allows. An open one refuses until its window has
+// passed, then admits a single probe (the first caller, probe=true) and
+// refuses the rest until that probe is answered, fails, is released
+// (RegisterRelease) or its budget (probeBudget) is spent.
+func (h *cooldownTable) RegisterAllow(name string, probeBudget time.Duration) (allow, probe bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	b := h.reg[name]
+	if b == nil || !b.open {
+		return true, false
+	}
+	now := time.Now()
+	if now.Before(b.openUntil) || now.Before(b.probeBy) {
+		return false, false
+	}
+	b.probeBy = now.Add(probeBudget)
+	return true, true
+}
+
+// RegisterRelease gives up an admitted probe that ended without a verdict
+// (the attempt was never sent, or the shared budget ran out first), so the
+// next caller may probe instead of waiting out the probe budget.
+func (h *cooldownTable) RegisterRelease(name string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if b := h.reg[name]; b != nil {
+		b.probeBy = time.Time{}
+	}
+}
+
+// RegisterAnswered closes the node's breaker: any response proves the
+// registrar is answering.
+func (h *cooldownTable) RegisterAnswered(name string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if b := h.reg[name]; b != nil {
+		b.fails, b.level, b.open = 0, 0, false
+		b.openUntil, b.probeBy = time.Time{}, time.Time{}
+	}
+}
+
+// RegisterUnanswered records one REGISTER attempt that drew no response.
+// probe is true only for the attempt RegisterAllow admitted as the
+// half-open probe. It reports whether this attempt opened (or re-opened)
+// the breaker, the open window, and whether the caller should log a WARN
+// now (at most one per node per registerWarnWindow, and always when the
+// breaker opens). An attempt dialed before the breaker opened that
+// finishes unanswered while it is open (probe=false) is only counted: it
+// neither escalates the backoff nor forces a WARN.
+func (h *cooldownTable) RegisterUnanswered(name string, probe bool) (opened bool, window time.Duration, warn bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	b := h.reg[name]
+	if b == nil {
+		b = &regBreaker{}
+		h.reg[name] = b
+	}
+	now := time.Now()
+	b.fails++
+	if (b.open && probe) || (!b.open && b.fails >= registerBreakerThreshold) {
+		// A failed half-open probe, or the threshold reached.
+		window = registerBreakerBackoff[min(b.level, len(registerBreakerBackoff)-1)]
+		b.level++
+		b.open, opened = true, true
+		b.openUntil = now.Add(window)
+		b.probeBy = time.Time{}
+	}
+	if opened || now.Sub(b.lastWarn) >= registerWarnWindow {
+		b.lastWarn = now
+		warn = true
+	}
+	return opened, window, warn
 }
 
 // Available reports whether the target may be used now — true unless it is
@@ -79,7 +189,12 @@ func (h *cooldownTable) snapshot(names []string, now time.Time) []SwitchNodeInfo
 	out := make([]SwitchNodeInfo, 0, len(names))
 	for _, n := range names {
 		info := SwitchNodeInfo{Address: n, State: NodeHealthy, LastFailure: h.lastFail[n]}
-		if until, ok := h.until[n]; ok && now.Before(until) {
+		until, ok := h.until[n]
+		if b := h.reg[n]; b != nil && b.open && b.openUntil.After(until) {
+			// An open REGISTER breaker outlasts the 30 s cooldown.
+			until, ok = b.openUntil, true
+		}
+		if ok && now.Before(until) {
 			info.State = NodeCoolingDown
 			info.CooldownUntil = until
 			info.CooldownRemaining = until.Sub(now)

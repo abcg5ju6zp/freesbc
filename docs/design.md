@@ -201,7 +201,7 @@ after the first SIGINT/SIGTERM (`cmd/freesbc/main.go:94-97`).
 | WebRTC establishment | `startWebRTC` (`media.go:327`) | `WebRTCSession.Start` returns |
 | `ackThenBye` (a 2xx FreeSBC will not relay) / `ack2xx` (its retransmission) | `refuse2xx` (`invite_leg.go:123-128`); `ack2xx` also from the re-INVITE relay (`indialog.go:110`) | its 5 s BYE context / after one write |
 | `sendCancel` (CANCEL toward a forwarded INVITE branch) | the INVITE paths (`invite.go:449,488`, `invite_leg.go:450,489`, `carrier.go:274`) | its 5 s CANCEL context |
-| `sendMiddleBye` (media ended a confirmed dialog; one per end) | `byeBothEnds` (`indialog.go:895-899`) | its 5 s BYE context |
+| `sendMiddleBye` (media ended a confirmed dialog; one per end) | `byeBothEnds` (`indialog.go:911`) | its 5 s BYE context |
 | per request: sipgo handler goroutine | sipgo | handler return (after the final response; `dialogTable` owns the dialog from then on) |
 | shield prune loop | `shield.New` (`shield.go:73`) | `Shield.Close` |
 
@@ -527,7 +527,7 @@ An OPTIONS with a To tag is answered locally without classification (`edge.go:97
 
 ### 6.2 Inbound path: carrier to switch
 
-An out-of-dialog INVITE that arrives on a public listener goes through admission (`admitPublicInvite`, `internal/edge/admission.go:81`), in this order:
+An out-of-dialog INVITE that arrives on a public listener goes through admission (`admitPublicInvite`, `internal/edge/admission.go:97`), in this order:
 
 1. Its exact transport and IP:port is a live client registration (`Location.HasSource`): `srcClient`. A registration wins over a carrier source, so a client behind a carrier's address is never sent down the carrier path.
 2. Its source is a carrier source on the right transport: `srcCarrier`, with the carrier's name. A resolved `edge.carriers` address counts only when the request arrived over that carrier's own transport (`carrierFor(src, network)`), so a tls carrier's IP over UDP is not admitted; an `edge.carrier_sources` entry matches by IP on any public transport.
@@ -542,7 +542,7 @@ The carrier source set for the shield (`carrierSnapshot.isSource`, IP only, so a
 - FreeSBC appends `X-FreeSBC-Carrier: <name>` after `prepareForward` (`invite.go:400-402`); `unknown` for a carrier-source address that matches no entry. The same stamp is added to ACK and in-dialog requests from a carrier (`stampCarrier`, `carrier.go:152`), which also counts them in the metric.
 - The Contact toward the switch is FreeSBC's private address, the Record-Route is the usual RFC 5658 double pair, and the SDP is built from scratch with a private anchor port (the standard upstream offer, `buildUpstreamOffer`). Responses go back through `respToCarrier` (§6.5).
 - Carriers are exempt from the per-source early-call cap `maxEarlyPerSource` (`invite.go:35`, `invite.go:280-291`). `shield.carrier_rate_limit` bounds them instead, and the shield never scanner-bans a carrier source (`internal/shield/shield.go:145-146`). The predicate is the live directory snapshot (`edge.go:449`).
-- A request from a carrier source that matches no dialog record and is not an INVITE (an ACK or BYE for a call whose record is gone) takes the in-dialog fallback: hashed by the DID to a node's carrier address, with the same Request-URI restoration and stamp (`directionFor`, `indialog.go:837-844`; `restoreCarrierRURI`, `hide.go:314`). `carrierFallback` (`carrier.go:140`) is the test: a carrier source that is not an exact live registration address.
+- A request from a carrier source that matches no dialog record and is not an INVITE (an ACK or BYE for a call whose record is gone) takes the in-dialog fallback: hashed by the DID to a node's carrier address, with the same Request-URI restoration and stamp (`directionFor`, `indialog.go:844-851`; `restoreCarrierRURI`, `hide.go:314`). `carrierFallback` (`carrier.go:140`) is the test: a carrier source that is not an exact live registration address.
 
 A public OPTIONS, including a carrier's keepalive, is answered locally and never reaches the switch (`onOptions`, `edge.go:976`).
 
@@ -625,9 +625,9 @@ Max-Forwards is decremented as on any proxied request; a zero Max-Forwards is 48
 
 ### 6.7 In-dialog requests on a carrier dialog
 
-A dialog is matched on Call-ID plus both tags (§7.7). `dialog.carrier` is set for both directions (`inviteToCarrier`, `inviteToUpstream`). ACK, CANCEL, BYE, re-INVITE, PRACK, UPDATE, INFO and NOTIFY in a carrier dialog take the same hiding rules because they leave through `prepareForwardFor` (`hide.go:74`) and `relayResponseHide`: `onAck` (`indialog.go:313`), `onInDialog` (`indialog.go:445`), `onReInvite` (`indialog.go:66-74`). The Request-URI of a forwarded in-dialog request is the far end's own Contact (`retargetInDialog`, `indialog.go:868`). The metric `freesbc_edge_carrier_requests_total` counts requests toward the carrier (`noteOutbound`, `hide.go:305`) and toward the switch (`stampCarrier`).
+A dialog is matched on Call-ID plus both tags (§7.7). `dialog.carrier` is set for both directions (`inviteToCarrier`, `inviteToUpstream`). ACK, CANCEL, BYE, re-INVITE, PRACK, UPDATE, INFO and NOTIFY in a carrier dialog take the same hiding rules because they leave through `prepareForwardFor` (`hide.go:74`) and `relayResponseHide`: `onAck` (`indialog.go:313`), `onInDialog` (`indialog.go:446`), `onReInvite` (`indialog.go:66-74`). The Request-URI of a forwarded in-dialog request is the far end's own Contact (`retargetInDialog`, `indialog.go:884`). The metric `freesbc_edge_carrier_requests_total` counts requests toward the carrier (`noteOutbound`, `hide.go:305`) and toward the switch (`stampCarrier`).
 
-The media-ended BYE FreeSBC sends on its own behalf (`sendMiddleBye`, `indialog.go:905`) masks the From and To hosts the same way when its target is a carrier (`indialog.go:931-935`).
+The media-ended BYE FreeSBC sends on its own behalf (`sendMiddleBye`, `indialog.go:921`) masks the From and To hosts the same way when its target is a carrier (`indialog.go:948-950`).
 
 Carrier-originated in-dialog requests are forwarded to the switch as the carrier sent them. They carry the masked public host in From/To (the carrier echoes what it was given), so the switch sees `public.ip` in those headers instead of its own address. Responses restore the original form only on requests the switch originated (`respToSwitch`).
 
@@ -1034,7 +1034,7 @@ Registered handlers: `REGISTER`, `INVITE`, `ACK`, `CANCEL`, `BYE`, `INFO`,
 | ACK | stateless forward (§7.8) |
 | CANCEL | only orphan CANCELs reach the handler (§7.8) |
 | PRACK, UPDATE | `onPrackUpdate` (`prack.go:30`): **481** with no To-tag or no dialog the tags name (early forks included); a PRACK with SDP that answers no owed offer → **488**; otherwise `onInDialog` (§7.8, §7.9a) |
-| BYE, INFO, NOTIFY | `onInDialog` (§7.8); NOTIFY whatever its `Event`, matched against the subscription table first (§7.8a). A NOTIFY with no To-tag from a public client → **481**; so is a public NOTIFY, REFER or MESSAGE that names no dialog or subscription (never hashed upstream, `indialog.go:504`). An out-of-dialog one from the switch is classified like an out-of-dialog INVITE (§7.5): a client token goes on, a carrier destination → **405**, anything else → **404**. A NOTIFY with a To-tag from the switch that `directionFor` cannot route is forwarded by Call-ID alone to that dialog's client, tags unchecked (`relaxedNotifyDirection`, §7.8); **481** only when no dialog with a public route has the Call-ID |
+| BYE, INFO, NOTIFY | `onInDialog` (§7.8); NOTIFY whatever its `Event`, matched against the subscription table first (§7.8a). A NOTIFY with no To-tag from a public client → **481**; so is a public NOTIFY, REFER or MESSAGE that names no dialog or subscription (never hashed upstream, `indialog.go:505`). An out-of-dialog one from the switch is classified like an out-of-dialog INVITE (§7.5): a client token goes on, a carrier destination → **405**, anything else → **404**. A NOTIFY with a To-tag from the switch that `directionFor` cannot route is forwarded by Call-ID alone to that dialog's client, tags unchecked (`relaxedNotifyDirection`, §7.8); **481** only when no dialog with a public route has the Call-ID |
 | OPTIONS | answered locally with **200 OK** + `Allow`; never forwarded to the switch, because relaying every phone's keepalive would multiply its load. From the private socket an out-of-dialog OPTIONS is classified first: a carrier destination is proxied to the carrier (§6), an unknown destination → **404**; FreeSBC itself or a client token → 200 |
 | SUBSCRIBE | `onSubscribe` (`subscribe.go:379`, §7.8a) |
 | REFER | `onInDialog`: **481** with no To-tag or no dialog, **603** on a carrier dialog (never forwarded), else forwarded unchanged (§7.8a) |
@@ -1070,7 +1070,7 @@ Per REGISTER:
    table in §7.3). Then, if the source is
    over the **enumeration limit**, drop it silently: no response, and
    nothing is forwarded (`enumLimiter.blocked`, `internal/edge/register.go:43`). The
-   limiter (`internal/edge/admission.go:171-262`) counts, per source key (an IPv4
+   limiter (`internal/edge/admission.go:243-329`) counts, per source key (an IPv4
    address; an IPv6 /64, as the shield's rate limiter keys it), the
    **distinct AoRs** whose REGISTER the switch answered with a final **403
    or 404** (`countsAsEnumeration`), in a fixed window of **10 minutes**
@@ -1246,7 +1246,7 @@ deliver.
 `onInvite` (`internal/edge/invite.go:47`) dispatches on the **arrival**
 `guard` passed in (§7.1), then on the request:
 
-1. **Admission** (`admitPublicInvite`, `internal/edge/admission.go:81`),
+1. **Admission** (`admitPublicInvite`, `internal/edge/admission.go:97`),
    for an INVITE with no To-tag that did not arrive on the private socket
    — that is, a public out-of-dialog INVITE. It runs first, before
    anything that could answer a scanner. The source is, in order:
@@ -1498,13 +1498,13 @@ reclamation of a confirmed dialog is the media silence watchdog, surfaced
 through `sess.Done()`. When it is the media that ends the dialog (the
 watchdog, or a WebRTC peer whose certificate does not match its
 fingerprint), `end()` reports it and the watcher calls the table's
-`onMediaEnd` — `byeBothEnds` (`indialog.go:895`, wired at `edge.go:228`) —
+`onMediaEnd` — `byeBothEnds` (`indialog.go:911`, wired at `edge.go:228`) —
 which sends **each endpoint a BYE on behalf of the other** (RFC 3261 §15):
 From/To and tags from the record, the Request-URI the endpoint's own
 Contact, the CSeq one above the highest the other endpoint used, out the
 same pinned socket `prepareForward` would use. A BYE toward a carrier masks
 the switch's address in From/To the way §6 describes (`sendMiddleBye`,
-`indialog.go:905`). Otherwise both would keep a silent call and the switch's
+`indialog.go:921`). Otherwise both would keep a silent call and the switch's
 own later BYE would get 481. An early dialog is bounded by
 `inviteTimeout = 5 * time.Minute` (`invite.go:24`).
 
@@ -1714,7 +1714,7 @@ and leave the INVITE ringing); `markSent` (`dialog.go:941`) tells the
 sender, which CANCELs the moment the INVITE is out. `track` refuses once
 the series is cancelled, so no later attempt starts.
 
-The `onCancel` handler (`indialog.go:381`) only ever sees an **orphan**
+The `onCancel` handler (`indialog.go:382`) only ever sees an **orphan**
 CANCEL: it looks up the early record by Call-ID **and From tag**
 (`dialogTable.early`) and answers **200** if there was an attempt to cancel
 and **481 Call/Transaction Does Not Exist** otherwise, because answering 200
@@ -1760,17 +1760,17 @@ more: a transaction finalises once. The pump's 488 for an answer it cannot
 anchor on a **provisional** also CANCELs that branch, which would otherwise
 ring on.
 
-**BYE / INFO / NOTIFY / REFER / MESSAGE / PRACK / UPDATE** (`onInDialog`, `indialog.go:445`): resolve
+**BYE / INFO / NOTIFY / REFER / MESSAGE / PRACK / UPDATE** (`onInDialog`, `indialog.go:446`): resolve
 direction, forward without Record-Route, retarget the Request-URI to the far
 end's own Contact, rewrite the Contact, and relay under a **32 s** budget
-(`indialog.go:638`). The CSeq of every in-dialog request is recorded per
+(`indialog.go:646`). The CSeq of every in-dialog request is recorded per
 endpoint (`noteCSeq`, `dialog.go:1015`). On a forwarding failure and
 **only for BYE**, FreeSBC makes one stateless re-send attempt toward the far
 side and then answers **200** to the requester — answering 408 would tell the
 switch its hangup failed and sofia would keep the leg. A BYE ends a dialog
 only when its tags name that confirmed dialog **and** the far end agreed:
 a 2xx, a 481 or 408 (which end the dialog for the sender too, §12.2.1.2), or
-no answer at all (`byeEndsDialog`, `indialog.go:749`). A BYE with tags
+no answer at all (`byeEndsDialog`, `indialog.go:765`). A BYE with tags
 that match no dialog is still forwarded — the endpoint answers 481 — but
 tears nothing down, and a 401/407 challenge leaves the call up.
 
@@ -1798,7 +1798,7 @@ A NOTIFY from the switch that **has** a To-tag but that `directionFor`
 cannot route — its tags name no dialog and its Request-URI carries no
 binding token — gets one relaxed lookup before it is refused
 (`onInDialog`, `indialog.go:484-486`; `relaxedNotifyDirection`,
-`indialog.go:723`; issue #84). FreeSWITCH's `uuid_phone_event` NOTIFY
+`indialog.go:739`; issue #84). FreeSWITCH's `uuid_phone_event` NOTIFY
 (`Event: talk` resuming a held call) copies its To header verbatim from
 the `sip_full_to` channel variable (mod_sofia's
 `SWITCH_MESSAGE_INDICATE_PHONE_EVENT`), so its To-tag can be another leg's
@@ -1824,7 +1824,7 @@ private-plane-only: BYE, INFO and ACK with a stray tag, and every NOTIFY
 from a public source, keep exact tag matching (a public one takes the public
 fallback below), and the no-To-tag rule above is unchanged.
 
-**Direction resolution** (`directionFor`, `indialog.go:768`):
+**Direction resolution** (`directionFor`, `indialog.go:784`):
 
 - A request whose Call-ID and tags name a confirmed dialog is routed by that
   record — `publicRemote` toward the client or carrier, `privateRemote` (the
@@ -1851,7 +1851,7 @@ fallback below), and the no-To-tag rule above is unchanged.
   switch answers honestly. Such a request carries no dialog, so nothing is
   torn down on its account.
 
-`retargetInDialog` (`indialog.go:868`) restores the far end's own Contact as
+`retargetInDialog` (`indialog.go:884`) restores the far end's own Contact as
 the Request-URI, undoing the topology hiding applied when the dialog was
 established: sofia tolerates the SBC's URI, a strict UA does not.
 
@@ -1874,7 +1874,7 @@ Record-Route handling as a call (double toward the switch, public entry only tow
 FreeSBC carried.
 
 - A public out-of-dialog SUBSCRIBE is admitted by `admitPublicOutOfDialog`
-  (`admission.go:120`): the transport source is the exact address of a live
+  (`admission.go:130`): the transport source is the exact address of a live
   registration (`Location.SourceBinding`, `location.go:214`, which also names
   the binding the subscription is charged to; the binding whose user equals
   the From user wins, else the first live one). A carrier source gets **405**;
@@ -1965,17 +1965,22 @@ as written and the transfer target's call is that endpoint's own INVITE,
 admitted like any other (§7.5). The sipfrag NOTIFYs of a transfer ride the
 call's dialog and are routed by it. A REFER with no To-tag is **481**
 (`indialog.go:465`); with no matching dialog it is **481** from either plane
-(`indialog.go:504`); on a carrier dialog it is **603** with an Info log
+(`indialog.go:505`); on a carrier dialog it is **603** with an Info log
 ("REFER on a carrier dialog declined") and is never forwarded, since its
 `Refer-To` would name an address behind the topology hiding
-(`indialog.go:511`). A Contact in a 2xx to a REFER is rewritten to name
-FreeSBC (`indialog.go:587-597`).
+(`indialog.go:518`). A Contact in a 2xx to a REFER is rewritten to name
+FreeSBC (`indialog.go:596-603`).
 
-**Unmatched public requests.** For BYE and INFO the generic fallback of
-`directionFor` hashes a public in-dialog request that names no dialog to the
-switch, which answers 481 itself (§7.8). That would let a REFER, MESSAGE or
-NOTIFY with a made-up To-tag past admission, so these three are answered
-**481** at the edge instead (`indialog.go:504`).
+**Unmatched public requests.** The generic fallback of `directionFor` hashes
+a public in-dialog request that names no dialog to the switch (§7.8). That
+would let a REFER, MESSAGE or NOTIFY with a made-up To-tag past admission, so
+these three are answered **481** at the edge instead (`indialog.go:505`). A
+BYE or INFO is still hashed to the switch (a registered client or a carrier
+whose dialog record is gone, e.g. after a restart), but only when
+`admitDialogless` (`admission.go:154`) passes: the source is the exact
+transport address of a live registration or a carrier source
+(`admitPublicInvite`). Any other public source is answered **481** and counted
+as `dialogless_not_admitted`; nothing is sent upstream (`indialog.go:512`).
 
 **MESSAGE** (RFC 3428, `onMessage`, `message.go:33`) is proxied with its body
 untouched. In-dialog MESSAGE and any MESSAGE from the switch take
@@ -1990,7 +1995,7 @@ unregistered source is dropped silently and counted as
 admission, so an unregistered source still gets silence. A Contact is
 rewritten only when the sender supplied one. A Contact in a response (a 3xx)
 is rewritten to FreeSBC's side, out of dialog (`message.go:71`) and in dialog
-(`indialog.go:587-597`, shared with REFER).
+(`indialog.go:596-603`, shared with REFER).
 
 The cap sees the declared length. A `Content-Length` longer than the body
 makes the message unparsable and sipgo drops it silently (no response, nothing
@@ -3485,7 +3490,7 @@ permanent series per call."
 | `freesbc_edge_register_unanswered_total` | Counter | — | edge `registerUnanswered` (`register.go:25`): one per REGISTER attempt a switch node answered with nothing (a silent node or a transport error); no node label |
 | `freesbc_edge_register_breaker_rejects_total` | Counter | — | edge `RegisterBreakerRejected`: one per client REGISTER answered 503 + `Retry-After: 30` without dialing because every node's REGISTER breaker was open (§7.4) |
 | `freesbc_edge_register_auth_failures_total` | Counter | — | edge `registerStrike` (`regguard.go`): one per failed REGISTER credential attempt struck against its source (§7.4), replays counted in the read filter included. No `source` label: the sources are in `GET /api/shield/offenders` |
-| `freesbc_edge_admission_drops_total` | Counter | `reason` ∈ {`invite_not_admitted`, `register_enumeration`, `subscribe_not_admitted`, `message_not_admitted`} | edge `dropSilently` (`admission.go:141`): a public out-of-dialog INVITE refused by admission (§7.5), a REGISTER from a source over the enumeration limit (§7.4), an out-of-dialog SUBSCRIBE or MESSAGE from a source without a live registration (§7.8a); every reason is always exported |
+| `freesbc_edge_admission_drops_total` | Counter | `reason` ∈ {`invite_not_admitted`, `register_enumeration`, `subscribe_not_admitted`, `message_not_admitted`, `dialogless_not_admitted`} | edge `dropSilently` (`admission.go:169`): a public out-of-dialog INVITE refused by admission (§7.5), a REGISTER from a source over the enumeration limit (§7.4), an out-of-dialog SUBSCRIBE or MESSAGE from a source without a live registration (§7.8a), a BYE or INFO naming no dialog from a source that is neither a live registration nor a carrier (answered 481, §7.8a); every reason is always exported |
 | `freesbc_edge_calls_ended_total` | Counter | `reason` ∈ {`bye_caller`, `bye_callee`, `bye_unanswered`, `rtp_silence`, `dtls_failure`, `reinvite_refused`, `answer_timeout`, `answer_unusable`, `media_fault`, `shutdown`, `ack_timeout`} | edge `dialog.end` (`dialog.go:1144`), one per confirmed call that ended, by the reason of the `end` that won (§7.7); every reason is always exported |
 | `freesbc_edge_ack_missed_total` | Counter | `plane` ∈ {`public`, `private`}: the side that failed to ACK a 2xx | edge `noteAckMiss` (`ack.go`), once per missed ACK (§7.7); both planes are always exported |
 | `freesbc_edge_invite_rejects_total` | Counter | `reason` ∈ {`early_cap`, `shutting_down`, `loop_detected`, `no_public_side`, `webrtc_disabled`, `no_target`, `too_many_hops`, `media_failed`, `port_exhausted`, `upstream_failed`, `timeout`, `session_cap`, `invite_rate`, `draining`} | edge `rejectInvite` / `rejectBusy` (`invite.go:148`, `invite.go:187`), one per final response the edge itself sends to an out-of-dialog INVITE (§7.7); every reason is always exported |
@@ -3507,7 +3512,7 @@ There is no config-reload metric and no carrier DNS metric.
 | Level | Examples |
 |---|---|
 | `Error` | `"proxy handler panic"` (+ stack); `"registration binding rejected"`; `"rejecting call: media ports exhausted"`; media relay panic (`"media relay panic; killing session"`); `"admin handler panic"` (+ stack); `"config watcher error"`, `"config reload failed, keeping previous config"`; `"config watcher exited"`, `"edge proxy exited"`, `"admin server exited"` |
-| `Warn` | `"config reload changes restart-only settings; …"`; `"config written via admin API"`; `shield banned scanner`; `shield banned source for repeated failures` (once per source key and window, §14.1); `"public request dropped by admission; …"` (the first drop per source IP and reason, remembered in a FIFO set capped at 4096, `maxWarnedSources`, `admission.go:116`); `"REGISTER enumeration limit reached; …"`; `"rejecting call: too many unanswered calls from one source"`; `"upstream INVITE unanswered; entering cooldown"` / `"upstream REGISTER unanswered; entering cooldown"` / `"upstream REGISTER unanswered; breaker open, REGISTERs not dialed"` (at most one per node per 30 s, plus one at each breaker opening); `"forward INVITE upstream"` / `"forward INVITE to client"` / `"forward INVITE to carrier"` / `"forward carrier REGISTER"` failures; `"carrier has no resolved address"`; `"carrier DNS lookup failed; keeping the last good addresses"`; `"carrier request names an unknown or expired registration token; …"`; `"2xx ACK never arrived; …"` (the first miss per plane, then at most one per minute, with `suppressed`); `"webrtc leg failed"`; the fingerprint-mismatch teardown; `"rejecting call to WebSocket client: …"` (a WebSocket client with no ws/wss listener cannot be offered DTLS-SRTP) |
+| `Warn` | `"config reload changes restart-only settings; …"`; `"config written via admin API"`; `shield banned scanner`; `shield banned source for repeated failures` (once per source key and window, §14.1); `"public request dropped by admission; …"` (the first drop per source IP and reason, remembered in a FIFO set capped at 4096, `maxWarnedSources`, `admission.go:188`); `"REGISTER enumeration limit reached; …"`; `"rejecting call: too many unanswered calls from one source"`; `"upstream INVITE unanswered; entering cooldown"` / `"upstream REGISTER unanswered; entering cooldown"` / `"upstream REGISTER unanswered; breaker open, REGISTERs not dialed"` (at most one per node per 30 s, plus one at each breaker opening); `"forward INVITE upstream"` / `"forward INVITE to client"` / `"forward INVITE to carrier"` / `"forward carrier REGISTER"` failures; `"carrier has no resolved address"`; `"carrier DNS lookup failed; keeping the last good addresses"`; `"carrier request names an unknown or expired registration token; …"`; `"2xx ACK never arrived; …"` (the first miss per plane, then at most one per minute, with `suppressed`); `"webrtc leg failed"`; the fingerprint-mismatch teardown; `"rejecting call to WebSocket client: …"` (a WebSocket client with no ws/wss listener cannot be offered DTLS-SRTP) |
 | `Info` | `"edge proxy listening"`, `"media planes ready"`, `"freesbc started"`, `"shutting down"`, `"admin server listening"`, `"config reloaded"`; `"proxying INVITE upstream"` / `"proxying INVITE to client"` / `"proxying INVITE to carrier"`; `"carrier registration"` with the granted expiry; `"carrier resolved"`; `"registration accepted"` / `"removed"` / `"rejected"`; `"webrtc media established"`; `"rejecting call: media not negotiable"`; `"ending the call; sending BYE to both ends"` with the `reason`; `"call ended"` with `reason`, `terminated_by`, `duration`, `webrtc`, `carrier` and media stats |
 | `Debug` | dialog ACK/BYE bookkeeping; `"2xx ACK never arrived"` for every miss; shield rate-limit drops and scanner-datagram drops; edge `"public request dropped by admission"` after the first per source; `"in-dialog request without a dialog record; hashing upstream"` and its carrier variant; `"pruned expired registration bindings"` / `"pruned expired carrier registrations"`; `"carrier DNS lookup still failing"`; `"forward carrier OPTIONS"`; dropped unroutable responses |
 
@@ -3812,14 +3817,14 @@ carrier source. The switch has no clause here: it speaks only on the private
 socket. Anything else is dropped before any response. A REGISTER is dropped
 from a source (IPv4 address or IPv6 /64) that has had 10 distinct AoRs
 rejected 403/404 within 10 minutes (`enumMaxAORs`, `enumWindow`,
-`admission.go:166`). A public out-of-dialog SUBSCRIBE or MESSAGE is held to
-the same registration test (`admitPublicOutOfDialog`, `admission.go:120`),
+`admission.go:238-239`). A public out-of-dialog SUBSCRIBE or MESSAGE is held to
+the same registration test (`admitPublicOutOfDialog`, `admission.go:130`),
 but a carrier source is answered 405 rather than admitted. All are silent
 drops keyed on the transport source only, never on From or any identity
 header, and are counted in `freesbc_edge_admission_drops_total` (§7.4, §7.5,
 §7.8a). A public NOTIFY, REFER or MESSAGE that names no dialog or
 subscription is answered 481 and never reaches the switch, so a made-up
-To-tag cannot carry it past admission (`indialog.go:504`). Subscription
+To-tag cannot carry it past admission (`indialog.go:505`). Subscription
 records are bounded per registration and in all (§15.1) and a SUBSCRIBE over
 either bound gets 503, which is not a drop.
 
@@ -4083,7 +4088,7 @@ be used to read an environment variable.
 
 | Entity | Cleanup trigger(s) | Bound |
 |---|---|---|
-| Edge dialog + media session + ports | a tag-matched BYE the far end accepted, the media watchdog (then BYE to both ends, `byeBothEnds`, `indialog.go:895`), `endUnlessUp` on a failed INVITE (`dialog.go:1125`), `closeAll` at shutdown (`dialog.go:592`) | early dialogs bounded by `inviteTimeout` (5 min, then CANCEL + 408); confirmed ones by `rtpSilenceTimeout` |
+| Edge dialog + media session + ports | a tag-matched BYE the far end accepted, the media watchdog (then BYE to both ends, `byeBothEnds`, `indialog.go:911`), `endUnlessUp` on a failed INVITE (`dialog.go:1125`), `closeAll` at shutdown (`dialog.go:592`) | early dialogs bounded by `inviteTimeout` (5 min, then CANCEL + 408); confirmed ones by `rtpSilenceTimeout` |
 | Edge in-flight attempt | `untrack` on handler return, or `cancelSeries` on CANCEL / backstop | the series context |
 | Client binding | un-REGISTER, `granted <= 0`, WebSocket close, expiry + the 30 s prune ticker | the registrar's granted lifetime |
 | Subscription record | a terminated NOTIFY, a 481, a non-2xx final to the first SUBSCRIBE, removal of its registration binding (`Location` hook), `subTable.prune` on the 30 s ticker, `closeAll` at shutdown | 32 per binding, 20000 in all (503 + `Retry-After: 30` beyond); deadline granted `Expires` + 32 s |
@@ -4118,9 +4123,9 @@ code constant.
 | `capWarnEvery` | 10 s per reason (`invite.go`) | spacing of the session-cap / invite-rate WARN lines |
 | `inviteTimeout` | 5 min (`invite.go:24`) | one whole call setup (client, carrier and switch-originated paths, and re-INVITE) |
 | `cancelDrain` | 300 ms (`invite_leg.go:297`) | post-CANCEL drain of the far end's final response |
-| CANCEL / `ackThenBye` BYE / BYE after media end | 5 s each (`invite_leg.go:363`, `invite_leg.go:468`, `indialog.go:953`) | one transaction |
+| CANCEL / `ackThenBye` BYE / BYE after media end | 5 s each (`invite_leg.go:363`, `invite_leg.go:468`, `indialog.go:971`) | one transaction |
 | INVITE client transaction after a 2xx | Timer M, 64·T1 (32 s; sipgo; `invite_leg.go:84`) | relaying 2xx retransmissions; a later fork's 2xx is ACKed and BYEd |
-| in-dialog (BYE/INFO/NOTIFY/REFER/MESSAGE/PRACK/UPDATE), SUBSCRIBE, out-of-dialog MESSAGE and carrier OPTIONS | 32 s (`indialog.go:638`, `subscribe.go:567`, `subscribe.go:650`, `message.go:67`, `carrier.go:305`) | `forwardAndRelay` |
+| in-dialog (BYE/INFO/NOTIFY/REFER/MESSAGE/PRACK/UPDATE), SUBSCRIBE, out-of-dialog MESSAGE and carrier OPTIONS | 32 s (`indialog.go:646`, `subscribe.go:567`, `subscribe.go:650`, `message.go:67`, `carrier.go:305`) | `forwardAndRelay` |
 | `subExpiryMargin` | 32 s (`subscribe.go:46`) | how long a subscription record outlives its granted expiry; a pending record lives twice that |
 | `subDefaultExpires` | 1 h (`subscribe.go:54`) | the lifetime assumed when neither the 2xx nor the SUBSCRIBE carries `Expires` |
 | `subCapRetryAfter` | 30 s (`subscribe.go:50`) | `Retry-After` of a 503 for a full subscription table |

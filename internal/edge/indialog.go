@@ -506,6 +506,13 @@ func (s *Server) onInDialog(req *sip.Request, tx sip.ServerTransaction, in inbou
 		s.reject(req, tx, 481, "Call/Transaction Does Not Exist")
 		return
 	}
+	// A BYE or INFO that names no dialog is forwarded to the hashed switch
+	// only for a source that is a registered client or a carrier; any
+	// other public sender is answered 481 here, with nothing sent upstream.
+	if d == nil && !in.private() && (req.Method == sip.BYE || req.Method == sip.INFO) && !s.admitDialogless(req, in.src) {
+		s.reject(req, tx, 481, "Call/Transaction Does Not Exist")
+		return
+	}
 	// Call transfer is the switch's business, and a carrier leg's Refer-To
 	// would name an address on the far side of the topology hiding. A
 	// REFER on a carrier dialog is declined, never forwarded.

@@ -15,6 +15,28 @@ import (
 // retry on its own schedule.
 const registerTimeout = 32 * time.Second
 
+// registerRetryAfter is the Retry-After (seconds) of the 503 sent while
+// every switch node's REGISTER breaker is open.
+const registerRetryAfter = 30
+
+// registerUnanswered counts one REGISTER attempt that drew no response from
+// a node, feeds its breaker, and logs a WARN at most once per node per
+// registerWarnWindow (and whenever the breaker opens).
+func (s *Server) registerUnanswered(name, aor, why string, probe bool) {
+	s.metrics.RegisterUnanswered()
+	opened, window, warn := s.upstreamCooldown.RegisterUnanswered(name, probe)
+	if !warn {
+		return
+	}
+	if opened {
+		s.log.Warn("upstream REGISTER unanswered; breaker open, REGISTERs not dialed",
+			"aor", aor, "upstream", name, "reason", why, "open_for", window.String())
+		return
+	}
+	s.log.Warn("upstream REGISTER unanswered; entering cooldown",
+		"aor", aor, "upstream", name, "reason", why, "cooldown", switchCooldown.String())
+}
+
 // onRegister proxies a REGISTER to FreeSWITCH and, on success, records the
 // binding needed to deliver inbound requests back to the client.
 //
@@ -101,10 +123,19 @@ func (s *Server) onRegister(req *sip.Request, tx sip.ServerTransaction, arrived 
 	// The user's hash order, cooled nodes at the tail: the registrar a
 	// refresh lands on is the one that holds the binding, and a node that
 	// just failed is only dialed once its alternatives have been tried.
+	dialed := false
 	for attempt, name := range s.upstreamOrder(user) {
 		if ctx.Err() != nil {
 			break // the shared budget is spent; the phone will retry
 		}
+		allow, probe := s.upstreamCooldown.RegisterAllow(name, registerTimeout)
+		if !allow {
+			// The node's REGISTER breaker is open: it has answered nothing
+			// for registerBreakerThreshold attempts in a row. Do not dial
+			// it; alternatives, if any, are tried next.
+			continue
+		}
+		dialed = true
 		entry := s.topo.upstreamEntryFor(name)
 
 		// A FRESH forward per attempt (prepareForward clones, so the
@@ -114,6 +145,9 @@ func (s *Server) onRegister(req *sip.Request, tx sip.ServerTransaction, arrived 
 		// registration database.
 		out, err := s.prepareForward(req, from, s.topo.private, entry.host, false)
 		if err != nil {
+			if probe {
+				s.upstreamCooldown.RegisterRelease(name)
+			}
 			s.reject(req, tx, 483, "Too Many Hops")
 			return
 		}
@@ -144,12 +178,16 @@ func (s *Server) onRegister(req *sip.Request, tx sip.ServerTransaction, arrived 
 			s.log.Warn("forward REGISTER upstream", "err", err, "aor", aor,
 				"upstream", name, "attempt", attempt+1)
 			if ctx.Err() != nil {
+				if probe {
+					s.upstreamCooldown.RegisterRelease(name)
+				}
 				break
 			}
 			// The REGISTER never got out — a transport error, not a
 			// timeout: a zero-response failure while the phone is still
 			// waiting. Cooldown the node and let the next one try.
 			s.upstreamCooldown.Penalize(name, cooldown)
+			s.registerUnanswered(name, aor, "transport error", probe)
 			continue
 		}
 		final, responded := s.pumpRegister(ctx, req, tx, clTx, in)
@@ -163,16 +201,29 @@ func (s *Server) onRegister(req *sip.Request, tx sip.ServerTransaction, arrived 
 			// phone's digest answer is valid there too. One extra round
 			// trip, not a broken registration.
 			s.upstreamCooldown.Recover(name)
+			s.upstreamCooldown.RegisterAnswered(name)
 			return
 		}
-		if !responded {
+		if responded {
+			// Provisional only, then silence: the node is alive.
+			s.upstreamCooldown.RegisterAnswered(name)
+		} else {
 			// Zero responses across a whole attempt with the phone still
 			// waiting: the node is suspect. Cooldown it so the NEXT
 			// registration prefers its alternatives.
 			s.upstreamCooldown.Penalize(name, cooldown)
-			s.log.Warn("upstream REGISTER unanswered; entering cooldown",
-				"aor", aor, "upstream", name, "cooldown", cooldown.String())
+			s.registerUnanswered(name, aor, "no response", probe)
 		}
+	}
+
+	if !dialed && ctx.Err() == nil {
+		// Every node's breaker is open: answer locally without dialing.
+		s.metrics.RegisterBreakerRejected()
+		s.metrics.RegistrationFailed()
+		res := sip.NewResponseFromRequest(req, 503, "Service Unavailable", nil)
+		res.AppendHeader(sip.NewHeader("Retry-After", strconv.Itoa(registerRetryAfter)))
+		s.respond(req, tx, res)
+		return
 	}
 
 	// Every node failed and nothing was relayed: one status, synthesised

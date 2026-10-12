@@ -130,6 +130,11 @@ type ProxyStats struct {
 	// RegisterAuthFailures counts failed REGISTER credential attempts
 	// struck against their source (shield.register_ban).
 	RegisterAuthFailures uint64 `json:"register_auth_failures_total"`
+	// RegisterUnanswered counts REGISTER attempts a switch node left
+	// unanswered; RegisterBreakerRejects the REGISTERs answered 503
+	// locally because every node's breaker was open.
+	RegisterUnanswered     uint64 `json:"register_unanswered_total"`
+	RegisterBreakerRejects uint64 `json:"register_breaker_rejects_total"`
 
 	RequestsIn   map[string]uint64 `json:"sip_requests_total"`
 	ResponsesOut map[string]uint64 `json:"sip_responses_total"`

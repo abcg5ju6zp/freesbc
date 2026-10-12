@@ -35,6 +35,8 @@ type collector struct {
 	proxyRegTotal   *prometheus.Desc
 	proxyRegFailure *prometheus.Desc
 	proxyRegAuth    *prometheus.Desc
+	proxyRegUnans   *prometheus.Desc
+	proxyRegBrk     *prometheus.Desc
 	proxyReqIn      *prometheus.Desc
 	proxyResOut     *prometheus.Desc
 	proxyRTPPktRx   *prometheus.Desc
@@ -90,6 +92,8 @@ func newCollector(deps Deps, audit *auditLog, health *healthTracker, tlsRec func
 		proxyRegTotal:   prometheus.NewDesc("freesbc_registration_total", "Registrations accepted by the upstream registrar through the proxy.", nil, nil),
 		proxyRegFailure: prometheus.NewDesc("freesbc_registration_failure_total", "Registrations that failed at or through the proxy.", nil, nil),
 		proxyRegAuth:    prometheus.NewDesc("freesbc_edge_register_auth_failures_total", "Failed REGISTER credential attempts struck against their source (shield.register_ban).", nil, nil),
+		proxyRegUnans:   prometheus.NewDesc("freesbc_edge_register_unanswered_total", "REGISTER attempts a switch node answered with nothing.", nil, nil),
+		proxyRegBrk:     prometheus.NewDesc("freesbc_edge_register_breaker_rejects_total", "REGISTERs answered 503 locally because every switch node's REGISTER breaker was open.", nil, nil),
 		// method and transport are bounded sets; a Call-ID label here would
 		// create a permanent series per call (spec §17).
 		proxyReqIn:      prometheus.NewDesc("freesbc_sip_requests_total", "SIP requests received by the edge proxy.", []string{"method", "transport"}, nil),
@@ -130,7 +134,7 @@ func (c *collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.healthSt
 	for _, d := range []*prometheus.Desc{
 		c.proxyRegs, c.proxySubs, c.proxyDialogs, c.proxySessions, c.proxyDraining, c.proxyMedia, c.proxyWebRTC,
-		c.proxyRegTotal, c.proxyRegFailure, c.proxyRegAuth, c.proxyReqIn, c.proxyResOut,
+		c.proxyRegTotal, c.proxyRegFailure, c.proxyRegAuth, c.proxyRegUnans, c.proxyRegBrk, c.proxyReqIn, c.proxyResOut,
 		c.proxyRTPPktRx, c.proxyRTPPktTx, c.proxyRTPByteRx, c.proxyRTPByteTx,
 		c.proxyPortFail, c.proxyICEFail, c.proxyDTLSFail, c.proxyPanics,
 		c.proxyAdmission, c.proxyCallsEnded, c.proxyAckMissed, c.proxyRejects, c.proxyParseFail, c.proxyStreams, c.proxyStreamRef, c.proxyStreamCls, c.proxyCarrierReq, c.proxyCarrierReg,
@@ -193,6 +197,8 @@ func (c *collector) Collect(ch chan<- prometheus.Metric) {
 	counter(c.proxyRegTotal, float64(p.RegistrationTotal))
 	counter(c.proxyRegFailure, float64(p.RegistrationFailure))
 	counter(c.proxyRegAuth, float64(p.RegisterAuthFailures))
+	counter(c.proxyRegUnans, float64(p.RegisterUnanswered))
+	counter(c.proxyRegBrk, float64(p.RegisterBreakerRejects))
 	for k, v := range p.RequestsIn {
 		method, transport, _ := strings.Cut(k, "/")
 		counter(c.proxyReqIn, float64(v), method, transport)

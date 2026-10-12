@@ -34,6 +34,11 @@ type Metrics struct {
 	// registerAuthFailures counts failed REGISTER credential attempts
 	// struck against their source (regguard.go).
 	registerAuthFailures atomic.Uint64
+	// registerUnanswered counts REGISTER attempts a switch node answered
+	// with nothing; registerBreakerRejects counts REGISTERs answered 503
+	// locally because every node's breaker was open.
+	registerUnanswered     atomic.Uint64
+	registerBreakerRejects atomic.Uint64
 
 	dialogs        atomic.Int64 // gauge
 	sessions       atomic.Int64 // gauge: calls holding a session slot
@@ -162,8 +167,10 @@ func (m *Metrics) RegistrationFailed() { m.registrationFailure.Add(1) }
 
 // RegisterAuthFailed counts one failed REGISTER credential attempt struck
 // against its source.
-func (m *Metrics) RegisterAuthFailed()    { m.registerAuthFailures.Add(1) }
-func (m *Metrics) SetRegistrations(n int) { m.registrations.Store(int64(n)) }
+func (m *Metrics) RegisterUnanswered()      { m.registerUnanswered.Add(1) }
+func (m *Metrics) RegisterBreakerRejected() { m.registerBreakerRejects.Add(1) }
+func (m *Metrics) RegisterAuthFailed()      { m.registerAuthFailures.Add(1) }
+func (m *Metrics) SetRegistrations(n int)   { m.registrations.Store(int64(n)) }
 
 // SetSubscriptions publishes the live subscription record count.
 func (m *Metrics) SetSubscriptions(n int) { m.subscriptions.Store(int64(n)) }
@@ -339,6 +346,9 @@ type Snapshot struct {
 	// RegisterAuthFailures is the failed REGISTER credential attempts
 	// struck against their source (shield.register_ban).
 	RegisterAuthFailures uint64
+	// RegisterUnanswered and RegisterBreakerRejects: see Metrics.
+	RegisterUnanswered     uint64
+	RegisterBreakerRejects uint64
 
 	RequestsIn   map[string]uint64
 	ResponsesOut map[string]uint64
@@ -389,22 +399,24 @@ type Snapshot struct {
 func (m *Metrics) Snapshot() Snapshot {
 	rtp := m.rtpTotals()
 	s := Snapshot{
-		ActiveRegistrations:  m.registrations.Load(),
-		ActiveSubscriptions:  m.subscriptions.Load(),
-		ActiveDialogs:        m.dialogs.Load(),
-		ActiveSessions:       m.sessions.Load(),
-		ActiveMediaSessions:  m.mediaSessions.Load(),
-		ActiveWebRTCSessions: m.webrtcSessions.Load(),
-		Draining:             m.draining.Load() == 1,
-		RegistrationTotal:    m.registrationTotal.Load(),
-		RegistrationFailure:  m.registrationFailure.Load(),
-		RegisterAuthFailures: m.registerAuthFailures.Load(),
-		RequestsIn:           map[string]uint64{},
-		ResponsesOut:         map[string]uint64{},
-		RTPPacketsRx:         rtp.RTPPacketsRx,
-		RTPPacketsTx:         rtp.RTPPacketsTx,
-		RTPBytesRx:           rtp.RTPBytesRx,
-		RTPBytesTx:           rtp.RTPBytesTx,
+		ActiveRegistrations:    m.registrations.Load(),
+		ActiveSubscriptions:    m.subscriptions.Load(),
+		ActiveDialogs:          m.dialogs.Load(),
+		ActiveSessions:         m.sessions.Load(),
+		ActiveMediaSessions:    m.mediaSessions.Load(),
+		ActiveWebRTCSessions:   m.webrtcSessions.Load(),
+		Draining:               m.draining.Load() == 1,
+		RegistrationTotal:      m.registrationTotal.Load(),
+		RegistrationFailure:    m.registrationFailure.Load(),
+		RegisterAuthFailures:   m.registerAuthFailures.Load(),
+		RegisterUnanswered:     m.registerUnanswered.Load(),
+		RegisterBreakerRejects: m.registerBreakerRejects.Load(),
+		RequestsIn:             map[string]uint64{},
+		ResponsesOut:           map[string]uint64{},
+		RTPPacketsRx:           rtp.RTPPacketsRx,
+		RTPPacketsTx:           rtp.RTPPacketsTx,
+		RTPBytesRx:             rtp.RTPBytesRx,
+		RTPBytesTx:             rtp.RTPBytesTx,
 
 		MediaPortAllocationFailures: m.portFailures.Load(),
 		HandlerPanics:               m.handlerPanics.Load(),

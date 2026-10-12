@@ -22,7 +22,7 @@ func countingPool(name string, lo, hi uint16, n *atomic.Int32) *PlanePool {
 func TestAllocationReadsParamsOncePerPool(t *testing.T) {
 	var n, na, nb atomic.Int32
 
-	p := countingPool("trunk", 23840, 23847, &n)
+	p := countingPool("shared", 23840, 23847, &n)
 	s, err := AllocateAcross(p, p, SessionConfig{})
 	if err != nil {
 		t.Fatal(err)

@@ -3434,7 +3434,7 @@ self-signed certificate.
 | RTP/RTCP ranges reachable end to end | **Assumed** |
 | IP fragmentation survives the path | **Assumed** |
 | Edge stream listeners (tcp, tls, ws, wss) are resource-capped | **Enforced** by constants: connection caps per source and in all, handshake, message and idle timeouts (§7.1a). The process file-descriptor limit is **assumed** to exceed the 10000-connection cap plus the RTP ports |
-| Changing a restart-only setting needs a restart | **Warned**: a reload that changes any restart-only key is still published, with a warning listing the keys (`config.RestartOnlyChanges`); the running planes keep their startup values |
+| Changing a restart-only setting needs a restart | **Warned**: a reload that changes any restart-only key is still published, with a warning listing the keys (`config.RestartOnlyChanges`); the running edge keeps its startup values |
 
 ---
 
@@ -3581,7 +3581,7 @@ variable. For a valid candidate, `restart_required` is
 `config.RestartOnlyChanges(running, candidate)`, where `running` is
 `Deps.Running()`: the snapshot the process started with, supplied by `app`
 (`adminDeps`), not `store.Current()`, which a hot reload may have advanced
-past what the planes actually run. It is `[]` for an invalid candidate.
+past what the edge actually runs. It is `[]` for an invalid candidate.
 Nothing is written and `Store.Replace` is never called. The admin API has no
 write path: the operator edits the file, runs `freesbc check`, and
 `config.Watch` sees the change in the parent directory, debounces 200 ms and
@@ -3759,7 +3759,7 @@ when the tab opens and on Reload, not polled. Registrations have a user search
 same way and show the total and `ban_adds_rejected`. All are read-only. Design
 rules are in `docs/admin-ui.md`.
 
-The State tab's tables read state the planes record for this purpose, all in
+The State tab's tables read state the edge records for this purpose, all in
 memory and copied under the owning lock: a ban's reason and start time
 (`banEntry`, `banlist.go:45`; `BanInfo`, `shield.go:266`), a switch node's last
 penalty time (`cooldownTable.lastFail`, `cooldown.go:24`, set in `Penalize`,
@@ -4245,7 +4245,7 @@ a fully cooled pool is dialled in its normal order rather than refused.
 **Reload with a bad config.** `Load` fails, the error is logged as
 `"config reload failed, keeping previous config"`, and the previous snapshot
 stays published. A reload that edits a restart-only setting is published, and
-the planes keep acting on their startup values (§4.4). Every media pool reads
+the edge keeps acting on its startup values (§4.4). Every media pool reads
 its parameters once per allocation, so in-flight calls are unaffected in any
 case (audit P2-MED-009).
 

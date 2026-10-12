@@ -144,9 +144,14 @@ type olCall struct {
 	call     *uacCall
 }
 
-func startOfferlessToSwitch(t *testing.T, hook func(h *harness) func(*sip.Request, sip.ServerTransaction) bool) *olCall {
+// pre callbacks run on the harness before the INVITE is sent, so a timing
+// knob they set is in place before the switch can answer.
+func startOfferlessToSwitch(t *testing.T, hook func(h *harness) func(*sip.Request, sip.ServerTransaction) bool, pre ...func(h *harness)) *olCall {
 	t.Helper()
 	h := startHarness(t, false)
+	for _, f := range pre {
+		f(h)
+	}
 	h.fs.setInviteHook(hook(h))
 	phone := newUDPClient(t)
 	o := &olCall{h: h, phone: phone, phoneRTP: listenRTP(t, freePort(t)), fsRTP: listenRTP(t, h.fs.rtpPort)}
@@ -238,8 +243,7 @@ func TestOfferlessInviteBadAnswerEndsCall(t *testing.T) {
 func TestOfferlessInviteLostACK(t *testing.T) {
 	o := startOfferlessToSwitch(t, func(h *harness) func(*sip.Request, sip.ServerTransaction) bool {
 		return offerIn200(h.fs, "uas-ol-lost", sdpWith(h.fs.rtpPort, "sendrecv"))
-	})
-	o.h.srv.ackWait.Store(int64(600 * time.Millisecond))
+	}, func(h *harness) { h.srv.ackWait.Store(int64(600 * time.Millisecond)) })
 	o.call.final200(t)
 	waitReceived(t, o.h.fs, sip.BYE, 1)
 	if waitInbound(o.phone, sip.BYE, 3*time.Second) == nil {

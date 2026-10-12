@@ -138,8 +138,7 @@ func TestAckMissingCallerByeIsByeCaller(t *testing.T) {
 func TestAckMissedOfferlessStaysAnswerTimeout(t *testing.T) {
 	o := startOfferlessToSwitch(t, func(h *harness) func(*sip.Request, sip.ServerTransaction) bool {
 		return offerIn200(h.fs, "uas-ol-ackmiss", sdpWith(h.fs.rtpPort, "sendrecv"))
-	})
-	o.h.srv.ackWait.Store(int64(600 * time.Millisecond))
+	}, func(h *harness) { h.srv.ackWait.Store(int64(600 * time.Millisecond)) })
 	o.call.final200(t)
 	waitReceived(t, o.h.fs, sip.BYE, 1)
 	waitForRelease(t, o.h)

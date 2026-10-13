@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>Sign in - FreeSBC Admin</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/assets/tokens.css">
+<link rel="stylesheet" href="/assets/ui.css">
+<script src="/assets/theme.js"></script>
+<script src="/assets/login.js" defer></script>
+</head>
+<body>
+<svg xmlns="http://www.w3.org/2000/svg" hidden>
+  <symbol id="i-error" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></symbol>
+</svg>
+<main class="login-page">
+  <form class="card login-card" id="login-form" autocomplete="on">
+    <div class="card-header">
+      <div class="card-heading">
+        <h1 class="card-title">FreeSBC Admin</h1>
+        <p class="card-description">Sign in with the admin password.</p>
+      </div>
+    </div>
+    <div class="card-content login-fields">
+      <input type="text" name="username" value="admin" autocomplete="username" hidden>
+      <label for="password">Password</label>
+      <input class="input login-input" id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+      <div class="alert" data-variant="destructive" id="login-error" role="alert" hidden>
+        <svg class="icon" aria-hidden="true"><use href="#i-error"/></svg>
+        <div class="alert-title" id="login-error-text"></div>
+      </div>
+      <button class="btn" type="submit" id="login-submit">Sign in</button>
+    </div>
+  </form>
+</main>
+</body>
+</html>

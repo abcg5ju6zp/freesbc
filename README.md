@@ -7,7 +7,7 @@ An open-source SIP/WebRTC edge proxy with the Caddy experience: **one binary, on
 - **Pure Go, one static binary, zero external dependencies**: no database, no Redis, no kernel modules, and **no external media process**.
 - **Keeps your switch off the public internet**: FreeSBC is the only element with a public address. FreeSWITCH or Asterisk stays on a private LAN and only ever talks to FreeSBC.
 - **Phones, browsers and carriers through one public address**: SIP/UDP, SIP/TCP and SIP/TLS phones, WS/WSS WebRTC browsers, and carriers (the switch uses FreeSBC as its outbound proxy).
-- **Embedded WebUI, REST API and Prometheus metrics** behind bcrypt Basic Auth.
+- **Embedded WebUI, REST API and Prometheus metrics** behind a bcrypt-checked admin login (a login form for the WebUI, Basic Auth for the API and metrics).
 
 ## Install
 
@@ -114,7 +114,7 @@ Details: [`docs/edge.md`](docs/edge.md) (behaviour, switch-side requirements, li
 - **Media anchoring**: RTP relay on FreeSBC ports with hardened first-packet latching and a silence watchdog; no transcoding.
 - **WebRTC**: ICE-Lite, DTLS-SRTP and RTCP-mux terminated for browsers (any of `edge.listen.ws`/`wss`), relayed to plain RTP.
 - **Built-in security**: per-IP rate limiting, scanner fingerprinting, in-memory bans, admission control for public INVITEs and REGISTER enumeration.
-- **Embedded WebUI + REST API**: a live dashboard, a read-only config view with candidate validation and diff, Prometheus metrics, bcrypt Basic Auth.
+- **Embedded WebUI + REST API**: a live dashboard, a read-only config view with candidate validation and diff, Prometheus metrics, bcrypt admin login (form for the WebUI, Basic Auth for the API).
 
 ## Documentation
 
@@ -129,11 +129,11 @@ Details: [`docs/edge.md`](docs/edge.md) (behaviour, switch-side requirements, li
 
 Enable the optional `admin` block (a bcrypt `password_hash`; generate with `freesbc hash-password`; the user is always `admin`), then:
 
-- browse `http://<admin.listen>/` (HTTP Basic Auth) for the live dashboard and the Config tab: the running file read-only, a candidate editor with Validate (the same checks as `freesbc check`, listing restart-only keys the candidate changes) and a line diff against the running file. The admin API never writes the config: edit the file, run `freesbc check -c freesbc.yaml`, and the watcher reloads it, as with nginx. Keep secrets as `${ENV}` references,
-- the Audit tab (`GET /api/audit`) lists the last 256 admin events: sign-ins (first successful login, failed login, rate-limited) and drain changes (`drain_on`, `drain_off`); `freesbc_admin_auth_failures_total` counts the failures. The source is the connecting address, so behind a reverse proxy it is the proxy's,
+- browse `http://<admin.listen>/` (the login form, a cookie session; Basic Auth remains for `/metrics` and `/api/*`) for the live dashboard and the Config tab: the running file read-only, a candidate editor with Validate (the same checks as `freesbc check`, listing restart-only keys the candidate changes) and a line diff against the running file. The admin API never writes the config: edit the file, run `freesbc check -c freesbc.yaml`, and the watcher reloads it, as with nginx. Keep secrets as `${ENV}` references,
+- the Audit tab (`GET /api/audit`) lists the last 256 admin events: sign-ins (first successful login, failed login, rate-limited), logouts and drain changes (`drain_on`, `drain_off`); `freesbc_admin_auth_failures_total` counts the failures. The source is the connecting address, so behind a reverse proxy it is the proxy's,
 - the Health tab and header badge (`GET /api/health`, `GET /api/health/history`) show whether anything needs attention: a switch node cooling down, carrier DNS failing, the RTP pool at 90 % or more, the shield ban table at its cap, 2xx ACKs not coming back from one side (3 in 10 min), the TLS certificate under 30 days from expiry or expired, plus the last 200 raise and clear events (in memory; thresholds are fixed, alerting stays in Prometheus; `freesbc_admin_health_status` exposes the status as 0, 1 or 2),
 - scrape `http://<admin.listen>/metrics` with Prometheus (`basic_auth` in the scrape config),
-- set `admin.pprof: true` to also serve Go pprof under `http://<admin.listen>/debug/pprof/` behind the same Basic Auth (off by default; restart-only),
+- set `admin.pprof: true` to also serve Go pprof under `http://<admin.listen>/debug/pprof/` behind the same auth (Basic Auth; off by default; restart-only),
 - read live state from `/api/status` (including a `reload` object: restart-only keys pending and the last failed reload), `/api/calls`, `/api/health` (overall status and the active conditions), `/api/audit`, `/api/tls` (the loaded TLS certificate, its expiry and whether the file on disk has been renewed; also the Overview's TLS card and `freesbc_tls_cert_expiry_timestamp_seconds`) and `/api/config`, and the live tables `/api/registrations`, `/api/carrier-registrations`, `/api/shield/bans`, `/api/switch-nodes` and `/api/carriers` (read-only; the WebUI's State tab shows them), and check a candidate file with `POST /api/config/validate` (body: the YAML; response `{"valid", "errors", "restart_required"}`; it writes nothing),
 - drain the node before a restart: `POST /api/drain` refuses new calls with `503` and `Retry-After: 30` while calls and registrations in place continue, `GET /api/drain` reports `active_calls`, `DELETE /api/drain` leaves drain mode (runtime state only; see [`docs/edge.md`](docs/edge.md)).
 

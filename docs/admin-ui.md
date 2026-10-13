@@ -19,13 +19,15 @@ to keep it consistent.
 ```
 webui/
   index.html          markup only: structure, ids, aria, icon sprite
+  login.html          the sign-in page (served at /login, no auth)
   assets/tokens.css   1. shadcn neutral  2. FreeSBC status  3. scale
   assets/ui.css       components; consumes tokens only
   assets/theme.js     pins light/dark; loaded sync in <head>
   assets/app.js       polling, rendering, config view, candidate validation and diff; loaded defer
+  assets/login.js     login form submit, error messages; loaded defer
 ```
 
-Dependencies run one way: `tokens.css ← ui.css ← index.html ← app.js`.
+Dependencies run one way: `tokens.css ← ui.css ← index.html ← app.js` (and `← login.html ← login.js`). `login.html`, `login.js`, `tokens.css`, `ui.css` and `theme.js` are the only files served without auth; everything else stays behind it (design.md §13.4).
 A component never defines a base colour; a page never styles itself; script
 never writes a colour.
 
@@ -129,6 +131,7 @@ shadcn's `cva` variant names and keeps one base class per component.
 | List | `ul.list` (`data-layout="grid"` for short lists) | Key/value or label/address rows. |
 | Alert | `.alert[data-variant] > svg.icon + .alert-title + .alert-body` | Inline, in place. `role="alert"` only for errors. |
 | Banner | `.banner` | Page-wide and persistent: session expired, restart required (restart-only keys changed on disk) and reload failed. Each is its own banner and hidden when it does not apply; the last two follow `reload` in `/api/status`. |
+| Login page | `login.html`: `.card` with a password `.input`, one default `.btn`, an `.alert` for errors | The only page served without auth. Submit is taken over by `login.js` (`fetch` `POST /api/login`; the CSP keeps `form-action 'none'`). 401 shows "Invalid password", 429 a separate "Too many failed attempts, try again later", each as a worded `.alert` with `role="alert"`; success does `location.replace('/')`. Focus returns to the password field on an error. Light and dark through `theme.js`. |
 | Empty state | `.empty` | Says what is missing and what will fill it. Never an empty table. |
 | Live status | `.status[data-state] > .dot + text` | `live`, `stale`, `expired`; `role="status"`. |
 
@@ -192,6 +195,7 @@ The data on this console is SIP state, so these rules are the core of
   opens, on Reload and after each poll while the tab is visible. Empty states
   say so ("No active conditions", "No events"). All API strings go in through
   `textContent`.
+- **Sign-out.** The header has a Log out button (`.btn`, outline or ghost, with a label; an icon-only form needs `aria-label`) that sends `POST /api/logout` and then goes to `/login`. A 401 from any API call shows the session banner with a link to `/login`, not "reload the page".
 - **Restart-only facts say so** where they are shown (listeners, the config
   hint), so nobody expects an edit to rebind a socket.
 
@@ -269,5 +273,6 @@ and leave the shadcn tokens alone:
    wide.
 5. Empty, loading, stale (API down) and error states are all designed.
 6. API strings go through `textContent`.
-7. `go test -race ./internal/admin` passes. `docs/design.md` §13.7 still
+7. A change to the login page keeps it on `tokens.css` and `ui.css` only, with no inline script or style (`TestUIHasNoInlineScriptOrStyle`), every string set with `textContent`, a generic error for a wrong password and a separate message for 429, state shown by words and not colour alone, and checked in light and dark. Any new file served without auth is added to the unauthenticated list on purpose, never by default.
+8. `go test -race ./internal/admin` passes. `docs/design.md` §13.7 still
    describes the UI.

@@ -68,17 +68,26 @@
     setLive("expired", "Signed out");
   }
 
-  // Any successful response proves the browser holds working credentials
-  // again (for example after it re-prompted), so the expired state ends.
+  // Any successful response proves the browser holds a working session
+  // again (for example after signing in in another tab), so the expired state ends.
   function clearSessionExpired() {
     if (!sessionExpired) return;
     sessionExpired = false;
     $("session-banner").hidden = true;
   }
 
+  // Log out drops the server-side session, then goes to the login page. The
+  // page is left either way: a failed request must not trap the operator.
+  function logout() {
+    fetch("/api/logout", { method: "POST", credentials: "same-origin" })
+      .catch(function () {})
+      .then(function () { location.replace("/login"); });
+  }
+  $("logout").addEventListener("click", logout);
+
   // fetchJSON performs a same-origin GET and parses JSON, abandoning it
-  // after FETCH_TIMEOUT_MS. Basic Auth credentials are already attached by
-  // the browser (same-origin reuse). On 401 it flags the session as
+  // after FETCH_TIMEOUT_MS. The session cookie is attached by the browser
+  // (same-origin). On 401 it flags the session as
   // expired; on other failures it rejects so the caller can keep
   // last-known-good data on screen.
   function fetchJSON(url) {

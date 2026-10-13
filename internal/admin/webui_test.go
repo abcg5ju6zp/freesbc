@@ -60,8 +60,12 @@ func TestUIAssets(t *testing.T) {
 		"/assets/theme.js":   "text/javascript",
 		"/assets/app.js":     "text/javascript",
 	} {
-		if rr := uiGet(t, s, path, false); rr.Code != http.StatusUnauthorized {
-			t.Errorf("GET %s no creds: %d want 401", path, rr.Code)
+		wantAnon := http.StatusUnauthorized
+		if path != "/assets/app.js" {
+			wantAnon = http.StatusOK // the login page's four files need no auth
+		}
+		if rr := uiGet(t, s, path, false); rr.Code != wantAnon {
+			t.Errorf("GET %s no creds: %d want %d", path, rr.Code, wantAnon)
 		}
 		rr := uiGet(t, s, path, true)
 		if rr.Code != http.StatusOK {

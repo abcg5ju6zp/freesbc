@@ -36,7 +36,7 @@
 <div id="session-banner" class="banner" role="alert" hidden>
   <div class="container">
     <svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg>
-    Session expired — reload the page to re-authenticate.
+    <span>Session expired. <a href="/login">Sign in again</a>.</span>
   </div>
 </div>
 
@@ -76,6 +76,7 @@
       <button class="btn" data-variant="ghost" data-size="icon" type="button" data-theme-toggle>
         <svg class="icon" aria-hidden="true"><use href="#i-theme-system"/></svg>
       </button>
+      <button class="btn" data-variant="outline" data-size="sm" type="button" id="logout">Log out</button>
     </div>
   </div>
 </header>

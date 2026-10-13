@@ -587,3 +587,14 @@ a.badge:hover { filter: brightness(0.95); }
   .btn, .badge, .card, .alert { border-color: CanvasText; }
   .dot { forced-color-adjust: none; }
 }
+
+/* ---- login page --------------------------------------------------------- */
+/* Top-aligned, not centred, so the card does not move when the error shows. */
+.login-page {
+  display: grid;
+  justify-items: center;
+  padding: 15vh calc(var(--spacing) * 6) calc(var(--spacing) * 6);
+}
+.login-card { width: min(100%, 24rem); }
+.login-fields { display: grid; gap: calc(var(--spacing) * 3); }
+.login-input { width: 100%; }

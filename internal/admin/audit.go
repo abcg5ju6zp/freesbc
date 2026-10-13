@@ -14,15 +14,18 @@ type AuditType string
 
 const (
 	// AuditLoginOK is the first successful verification of a credential
-	// from a source. Requests that hit the verified-credentials cache are
-	// not logged.
+	// from a source, or a successful POST /api/login. Requests that hit the
+	// verified-credentials cache or carry a session cookie are not logged.
 	AuditLoginOK AuditType = "login_ok"
-	// AuditLoginFailed is a request that carried Basic credentials that did
+	// AuditLoginFailed is a request that carried Basic credentials or a POST /api/login that did
 	// not verify. A request with no Authorization header is not an event.
 	AuditLoginFailed AuditType = "login_failed"
 	// AuditLoginLimited is a request answered 429 by the per-source
 	// auth-failure limiter.
 	AuditLoginLimited AuditType = "login_limited"
+	// AuditLogout is a POST /api/logout that dropped a live session. A
+	// logout with no cookie or an unknown one is not an event.
+	AuditLogout AuditType = "logout"
 	// AuditDrainOn is an authenticated POST /api/drain that moved the edge
 	// into drain mode. A repeated POST that changes nothing is not an event.
 	AuditDrainOn AuditType = "drain_on"

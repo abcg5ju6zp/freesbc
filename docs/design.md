@@ -184,8 +184,8 @@ Created once, alive for the process lifetime:
 2. `edge.Server.Run`: always; its error is fatal (`app.go:81-87`).
 3. `admin.Server.Run`: if `admin:` exists at startup; fatal. It starts two
    goroutines: the health tracker's ticker (every 5 s, `healthInterval`,
-   `admin/server.go:257-260`), which `Run` cancels and waits for before it
-   returns, and the HTTP serve goroutine (`admin/server.go:263`).
+   `admin/server.go:280-285`), which `Run` cancels and waits for before it
+   returns, and the HTTP serve goroutine (`admin/server.go:288`).
 
 `cmd/freesbc`'s `withSignals` adds one more, which releases signal capture
 after the first SIGINT/SIGTERM (`cmd/freesbc/main.go:94-97`).
@@ -409,7 +409,7 @@ P2-CFG-007), diffed against the snapshot current when the watcher started.
 The edge never acts on the new values: it keeps the snapshot it was built
 from (`edge.Server.boot`) and reads every restart-only setting from it, never
 from the store; the admin server likewise holds its startup `AdminConfig` and
-`TLSConfig` (`admin.New`, `admin/server.go:206`).
+`TLSConfig` (`admin.New`, `admin/server.go:223`).
 
 `Watch` also records its last outcome on the store for the life of the process
 (`config.ReloadStatus`, read through `Store.ReloadStatus()`, which returns a
@@ -451,7 +451,7 @@ session timers or media timeouts. `defer sh.Close()` on the shield (and the
 sipgo client and user agent) fires after all of this.
 
 **Admin**: on `ctx.Done()`, `srv.Shutdown` under a fresh **5 s** timeout
-(`admin/server.go:288-290`). In-flight HTTP requests are drained up to that
+(`admin/server.go:313-315`). In-flight HTTP requests are drained up to that
 budget.
 
 **Shield.Close**: cancel the prune loop and wait for it. Bans are in memory
@@ -3307,7 +3307,7 @@ spin.
 |---|---|
 | `edge.guard` (`edge.go:1031`) | every registered edge handler; logs, counts, and answers 500 unless a final already went out |
 | `media.recoverRelayPanic` (`media/relay.go:115`) | every relay goroutine; closes **that session only** |
-| `admin.recoverMW` (`admin/server.go:626`) | every HTTP handler; logs the panic with its stack, answers 500 with no stack in the body, and re-panics `http.ErrAbortHandler` per the stdlib convention |
+| `admin.recoverMW` (`admin/server.go:672`) | every HTTP handler; logs the panic with its stack, answers 500 with no stack in the body, and re-panics `http.ErrAbortHandler` per the stdlib convention |
 | `config.unmarshalStrict` (`config/loader.go:54`) | the go-yaml decoder inside `Parse`; a decoder panic becomes a parse error |
 | `config.loadNoPanic` (`config/reload.go:158`) | each hot reload in `Watch`; a panic is a failed reload and the previous snapshot stays |
 
@@ -3401,7 +3401,7 @@ own firewall in front of FreeSBC.
 | Surface | Certificate | Minimum version | Client auth |
 |---|---|---|---|
 | Edge `tls` and `wss` listeners | top-level `tls.cert`/`tls.key`, loaded when the listener binds (`openListener`); `check` requires `tls` whenever `edge.listen.tls` or `edge.listen.wss` is set | TLS 1.2 | — |
-| Admin HTTPS | the same `tls` identity, served only when `admin.allow_remote` is set (`admin/server.go:243-277`); a loopback admin serves plain HTTP | TLS 1.2 | — |
+| Admin HTTPS | the same `tls` identity, served only when `admin.allow_remote` is set (`admin/server.go:289-308`); a loopback admin serves plain HTTP | TLS 1.2 | — |
 | WebRTC DTLS | one per-process self-signed ECDSA P-256 certificate (CN "FreeSBC", 1-year validity, `media/dtlscert.go:36-87`), created when `edge.listen.ws` or `wss` is set | — | `RequireAnyClientCert` (`webrtcleg.go:539`), so there is always something to fingerprint |
 
 The DTLS certificate is never verified as a chain: the browser's identity
@@ -3504,7 +3504,7 @@ reachable there. Current ban counts and ban-table overflow are kept in
 
 The Go runtime collector (`collectors.NewGoCollector`) and the process collector (`collectors.NewProcessCollector`: `process_cpu_seconds_total`, `process_resident_memory_bytes`, `process_open_fds` and the like, Linux only apart from `process_start_time_seconds`) are registered too.
 
-With `admin.pprof: true` the admin listener also serves `net/http/pprof` under `/debug/pprof/` (`handlePprof`, `admin/server.go:678`), routed behind the same `requireAuth` as every other route; with it off that path answers 404. A CPU profile or trace lifts the 30 s write deadline for its own response. pprof exposes goroutine stacks and heap contents, so keep the listener private.
+With `admin.pprof: true` the admin listener also serves `net/http/pprof` under `/debug/pprof/` (`handlePprof`, `admin/server.go:721`), routed behind the same `requireAuth` as every other route; with it off that path answers 404. A CPU profile or trace lifts the 30 s write deadline for its own response. pprof exposes goroutine stacks and heap contents, so keep the listener private.
 There is no config-reload metric and no carrier DNS metric.
 
 ### 13.2 Log levels
@@ -3527,8 +3527,8 @@ The default process log level is `Info` and there is no flag to change it.
 
 ### 13.3 Admin HTTP API
 
-All routes are on one `http.ServeMux` (`server.go:202-217`) behind `recoverMW`
-(`server.go:596`) and `guardMW` (`guard.go`). `recoverMW` sets
+All routes are on one `http.ServeMux` (`server.go:233-264`) behind `recoverMW`
+(`server.go:672`) and `guardMW` (`guard.go`). `recoverMW` sets
 `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` and
 `Referrer-Policy: no-referrer` on **every** response, error responses
 included, and `Cache-Control: no-store` on every response except `/healthz`;
@@ -3539,6 +3539,8 @@ Host and Origin checks (§14, Admin) before any auth work, on every route but
 | Pattern | Methods | Auth | Response |
 |---|---|---|---|
 | `/healthz` | any | **none** | `{"status":"ok"}` |
+| `/api/login` | POST (else 405 + `Allow: POST`) | **none** (it is the sign-in) | JSON `{"password"}`, at most 4 KiB; the user is always `admin`. Behind `guardMW` (Host and Origin), not `requireAuth` (`handleLogin`, `session.go:154`). Success is **204** with `Set-Cookie: freesbc_session` (§13.4); a wrong password is a generic 401 with no `WWW-Authenticate`; over the limiter's budget is 429; a malformed or oversized body is 400 and is not counted as a failure |
+| `/api/logout` | POST (else 405 + `Allow: POST`) | **none** (idempotent) | behind `guardMW`; deletes the session the cookie names, if any, and always clears the cookie (`Max-Age=0`); always **204** (`handleLogout`, `session.go:193`). A live session dropped is a `logout` event (§13.5) |
 | `/metrics` | any | Basic | Prometheus text |
 | `/api/status` | any | Basic | `{"version","uptime_seconds","active_calls","ports":{"in_use","total"},"listeners":[…],"listener_info":[{"transport","bind","advertised","private"}]}`; `listener_info` pairs each bound socket with the address FreeSBC advertises for it (`public.ip` on a public listener, equal to `bind` outside 1:1 NAT; `Deps.ListenerInfos`); `listeners` are the sockets the edge bound, from its startup snapshot (`Deps.Listeners`): `udp://`, `tcp://`, `tls://`, `ws://`, `wss://` on `public.bind`, then `udp://<private.ip>:5060 (private)`. It also carries `"reload":{"last_ok","restart_required","last_error","last_error_at"}` (`Deps.Reload`, §4.4): the times are RFC 3339 UTC and null until they apply (`last_ok` before the first reload; `last_error` and `last_error_at` while the last reload has not failed), `restart_required` is always an array |
 | `/api/calls` | any | Basic | array of `{"id","call_id","from","to","started" (RFC 3339),"duration_seconds"}`; always an array. Confirmed edge dialogs only, the set `active_calls` counts: `id` is `edge:<Call-ID>;<caller tag>`; `from`/`to` are `edge:public` / `edge:private` for a client call, and `carrier:<name>` / `switch:<ip:port>` for a carrier call, caller first (`dialogTable.calls`, `dialog.go:544`) |
@@ -3556,8 +3558,11 @@ Host and Origin checks (§14, Admin) before any auth work, on every route but
 | `/api/config` | GET (else 405 + `Allow: GET`) | Basic | the **redacted** running view |
 | `/api/config/raw` | GET (else 405 + `Allow: GET`) | Basic | the on-disk file **verbatim and unredacted**, `application/x-yaml` |
 | `/api/config/validate` | POST (else 405 + `Allow: POST`) | Basic | check a candidate file, write nothing: `{"valid","errors","restart_required"}` |
-| `/assets/<file>` | any | Basic | a static WebUI asset from the embedded `webui/assets` (`tokens.css`, `ui.css`, `theme.js`, `app.js`); 404 for anything else, never a listing |
-| `/` | any | Basic | the embedded WebUI page (catch-all; the explicit patterns win) |
+| `/login` | GET, HEAD | **none** | the embedded `login.html` (§13.7) |
+| `/assets/<file>` | any | **none** for `tokens.css`, `ui.css`, `theme.js` and `login.js`; session or Basic for `app.js` | a static WebUI asset from the embedded `webui/assets`; 404 for anything else, never a listing |
+| `/` | any | session or Basic | the embedded WebUI page (catch-all; the explicit patterns win) |
+
+"Basic" in the Auth column means Basic credentials **or** a valid session cookie (§13.4): a browser signed in through `/login` reaches every `/api/*` route with its cookie, while Prometheus and curl keep sending Basic.
 
 `GET /api/config` shows the running snapshot in the config's own shape with
 JSON keys (`redactConfig`, `redact.go:9`): `public`, `private`, `rtp` (`min`,
@@ -3594,35 +3599,54 @@ The admin section is restart-only (`admin` in `RestartOnlyChanges`): the
 hot password rotation. The user name is always `admin` (`config.AdminUser`);
 the password is checked against `admin.password_hash`.
 
-`requireAuth` (`server.go:280`) runs per request:
+`requireAuth` (`server.go:356`) runs per request, in this order:
 
-1. A request with **no (parseable) Basic `Authorization` header** gets
-   `WWW-Authenticate: Basic realm="freesbc"` and **401 — without running
-   bcrypt and without counting a failure**: it guesses nothing, and a
-   browser's first request to the dashboard always looks like this.
-2. If the credentials match a **previously verified** entry
+0. A **valid session cookie** (`freesbc_session`, §13.4a) serves the request
+   and touches the session's idle timer. No bcrypt and no limiter check: the
+   ID is 256 random bits, so presenting an unknown or expired one is not a
+   failed attempt and is never counted.
+1. Else, a **valid Basic `Authorization`** header takes the path below
+   unchanged (B1 to B3 below: `verifiedCreds`, limiter, bcrypt).
+2. Else, no credentials (or an unknown or expired cookie with no Basic
+   header), which runs no bcrypt and counts no failure, and the answer depends
+   on the client (`noCredentials`, `server.go:406`):
+   - a **browser navigation** (`Sec-Fetch-Mode: navigate`, GET or HEAD) gets
+     **303 See Other** to `/login`, with no `WWW-Authenticate`, so the native
+     Basic dialog never appears;
+   - any other browser request (any `Sec-Fetch-Mode` header, such as the
+     WebUI's `fetch`) gets **401 without `WWW-Authenticate`**, so `fetch`
+     cannot raise the dialog either;
+   - a request with no `Sec-Fetch-Mode` (curl, Prometheus) gets
+     `WWW-Authenticate: Basic realm="freesbc"` and **401**, as before.
+
+   It guesses nothing, and a browser's first request to the dashboard always
+   looks like this.
+
+Basic credentials that reach this point are checked as follows.
+
+B1. If the credentials match a **previously verified** entry
    (`verifiedCreds`), the request is served with no bcrypt and no limiter
    check. Entries are HMAC-SHA256 digests (per-process random key) over the
    configured hash plus the presented username and password; at most **16**
-   are kept (`verifiedCredsMax`, `server.go:484`), each for **1 h** after its
+   are kept (`verifiedCredsMax`, `server.go:581`), each for **1 h** after its
    last use. This is what keeps an operator or the Prometheus scrape working
    when a shared source address (loopback, a reverse proxy) is locked out by
    someone else's failures, and it saves a KDF per scrape. Only an exact
    header that already passed bcrypt matches, so it gives a guesser nothing.
-3. `remoteIP(r)` from `RemoteAddr` — **`X-Forwarded-For` is never
+B2. `remoteIP(r)` from `RemoteAddr` — **`X-Forwarded-For` is never
    consulted** — then `limiter.reserve`: under the limiter's lock, if the
    source is over budget → **429** `too many failed attempts` with no
    credential check; otherwise one failure is counted **in advance**. The
    check and the count are one critical section, so concurrent requests can
    never take more than the remaining budget (audit P2-ADM-002).
-4. `subtle.ConstantTimeCompare` on the username **and**
+B3. `subtle.ConstantTimeCompare` on the username **and**
    `bcrypt.CompareHashAndPassword` on the password are **both** evaluated
    before deciding. On failure the reserved count stays and the answer is a
    generic 401; on success the reservation is refunded and the credentials
-   are remembered (step 2).
+   are remembered (B1).
 
 Limiter constants (`authFailLimit`, `authFailWindow`, `authFailMaxIPs`,
-`server.go:345-347`): **10** failures per **1 minute** fixed window per source,
+`server.go:442-444`): **10** failures per **1 minute** fixed window per source,
 tracking at most **4096** sources. A source (`limiterKey`) is an IPv4 address
 (IPv4-mapped addresses are unmapped) or an IPv6 **/64**, so one host cannot
 mint fresh budgets from its own prefix. There is no background sweeper:
@@ -3634,17 +3658,47 @@ cannot reset an exhausted attacker's budget (audit P2-ADM-003). A refund whose
 window has since rolled over is dropped. A client whose credentials were never
 verified still gets 429 while its source is over budget.
 
-`http.Server` timeouts (`newHTTPServer`, `server.go:327`): `ReadHeaderTimeout`
+`http.Server` timeouts (`newHTTPServer`, `server.go:424`): `ReadHeaderTimeout`
 5 s, `ReadTimeout` 30 s, `WriteTimeout` 30 s, `IdleTimeout` 30 s. Shutdown
 gets a 5 s drain. With `admin.allow_remote` the listener serves HTTPS (TLS 1.2
 minimum) using the top-level `tls` identity, loaded when the admin server
-starts (`server.go:216`); otherwise it serves plain HTTP, which validation
+starts (`server.go:308`); otherwise it serves plain HTTP, which validation
 admits only on a loopback address.
 
 
+**Login endpoint and sessions** (`session.go:41-133`, the store; `handleLogin` at `session.go:154`). `POST /api/login` reuses the Basic
+path's machinery: `limiter.reserve` before bcrypt (the same table and the same
+10 per minute per source, so a Basic guess and a form guess share one budget)
+and bcrypt (the form has no user field: the user is always `admin`), then the `login_ok`,
+`login_failed` and `login_limited` events (§13.5) and
+`freesbc_admin_auth_failures_total`. A success refunds the reservation, and
+answers 204 with the cookie. It does not enter `verifiedCreds`.
+
+The session store is in memory only. An ID is 32 bytes from `crypto/rand`,
+base64url without padding; the store is keyed by a SHA-256 of the ID so the
+stored key is not the secret. Constants: `sessionIdleTimeout` = **30 min**
+since the last request, `sessionMaxAge` = **12 h** since login, `sessionMax` =
+**8** live sessions. A login past the cap evicts the oldest by creation time.
+Expired sessions are pruned lazily on access and on login. The WebUI polls, so
+an open dashboard keeps the idle timer alive and the 12 h bound is what ends
+it. A restart logs everyone out, and since `admin` is restart-only, so does a
+password change.
+
+The cookie is `sessionCookieName` = `freesbc_session`, `HttpOnly; SameSite=Strict;
+Path=/`, and `Secure` exactly when the admin listener serves TLS (without TLS,
+validation makes admin loopback-only). Login sets no `Max-Age` or `Expires`
+(a browser-session cookie; the server enforces both timeouts), and logout sets
+`Max-Age=0`. CSRF needs no token: `guardMW` already rejects a non-GET request
+whose `Origin` or `Sec-Fetch-Site` is not same-origin, and `SameSite=Strict`
+keeps the cookie off cross-site requests.
+
+A browser that still holds cached Basic credentials from before keeps working
+through the Basic path, and "Log out" cannot make it forget them; closing the
+browser does.
+
 ### 13.5 Admin audit log
 
-`requireAuth` records auth events (`audit.go`) in a bounded in-memory ring
+`requireAuth`, `handleLogin` and `handleLogout` record auth events (`audit.go`) in a bounded in-memory ring
 (`auditRingSize` = **256**, oldest dropped) and as one `admin audit` log line
 at Info with a fixed field set: `type`, `source`, `result`, `at` (RFC 3339 UTC).
 `GET /api/audit` and the WebUI's Audit tab read the ring, newest first. The
@@ -3653,14 +3707,15 @@ action can reuse the path):
 
 | `type` | `result` | When |
 |---|---|---|
-| `login_ok` | `ok` | the **first** verification of a credential: the `verifiedCreds.add` after a successful bcrypt check. A request served from the cache is not an event, so an unchanged scrape produces none |
-| `login_failed` | `bad_credentials` | Basic credentials were presented and the username or password did not verify |
+| `login_ok` | `ok` | the **first** verification of a credential: the `verifiedCreds.add` after a successful bcrypt check, or a successful `POST /api/login` (one per session created). A request served from the cache or a session cookie is not an event, so an unchanged scrape or a polling dashboard produces none |
+| `logout` | `ok` | a `POST /api/logout` that dropped a live session. A logout with no cookie or an unknown one is not an event |
+| `login_failed` | `bad_credentials` | Basic credentials were presented, or `POST /api/login` was sent, and the username or password did not verify |
 | `drain_on` | `ok` | `handleDrain` (`api.go`): a POST /api/drain that actually entered drain mode (`SetDraining` returned changed). A repeated POST, a GET and any request refused before the toggle are not events |
 | `drain_off` | `ok` | a DELETE /api/drain that actually left drain mode, same rule |
-| `login_limited` | `rate_limited` | the per-source limiter answered 429, **once per lockout window per limiter key**: only the first 429 of a window is an event (`authFailEntry.denied`, set by `reserve` under the limiter's lock and cleared when a new window starts), so a locked-out source cannot flush the ring or flood the log |
+| `login_limited` | `rate_limited` | the per-source limiter answered 429 (Basic or `/api/login`), **once per lockout window per limiter key**: only the first 429 of a window is an event (`authFailEntry.denied`, set by `reserve` under the limiter's lock and cleared when a new window starts), so a locked-out source cannot flush the ring or flood the log |
 
-A request with no (parseable) Basic header is **not** an event: it guesses
-nothing and a browser's first request always looks like that (§13.4 step 1).
+A request with no credentials (no session cookie and no parseable Basic header) is **not** an event: it guesses
+nothing and a browser's first request always looks like that (§13.4 step 2).
 
 `source` is `remoteIP(r)`; `X-Forwarded-For` is never consulted, so behind a
 reverse proxy it is the proxy's address. An event never carries the
@@ -3718,10 +3773,13 @@ shows the status as a badge linking to the Health tab (§13.7).
 ### 13.7 WebUI
 
 The `//go:embed`ed `webui` directory (`webui.go`): `index.html` (markup
-only) plus `assets/` — `tokens.css` (the shadcn/ui neutral theme plus FreeSBC
-status tokens), `ui.css` (components), `theme.js` (light/dark pin) and
-`app.js` (behaviour). All of it is served behind the same Basic auth as
-everything else, with `Content-Security-Policy` `default-src 'none';
+only), `login.html` (the sign-in page) plus `assets/` — `tokens.css` (the
+shadcn/ui neutral theme plus FreeSBC status tokens), `ui.css` (components),
+`theme.js` (light/dark pin), `app.js` (behaviour) and `login.js` (the sign-in
+form). Only `login.html` (served at `/login`), `login.js`, `tokens.css`,
+`ui.css` and `theme.js` are served without credentials, because the login page
+needs them to render; `index.html` and `app.js` stay behind `requireAuth`
+(session cookie or Basic, §13.4). All of it is served with `Content-Security-Policy` `default-src 'none';
 script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src
 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
 `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` and
@@ -3730,6 +3788,14 @@ admin response carries. The page loads nothing from another origin; inline
 script, style and event handlers are blocked by the CSP and rejected by
 `TestUIHasNoInlineScriptOrStyle`.
 
+The **login page** (`/login`) is a password field and a submit button. `form-action
+'none'` stays: `login.js` takes over the submit and sends `POST /api/login`
+with `fetch`. A 401 shows a generic "Invalid password", a 429 a separate "Too
+many failed attempts, try again later" (both set with `textContent`, with a
+word and not colour alone), and success runs `location.replace('/')`. It
+follows `theme.js` for light and dark. The header carries a **Log out**
+button that sends `POST /api/logout` and then goes to `/login`.
+
 Five hash-routed views: an **Overview** polling `/api/status`, `/api/calls`,
 `/api/drain`, `/api/health` and `/api/tls` every 5 s (port-pool meter warns at 80 % and 95 %; the TLS certificate card
 is hidden unless `/api/tls` reports a loaded leaf, and its banner shows when
@@ -3737,8 +3803,8 @@ is hidden unless `/api/tls` reports a loaded leaf, and its banner shows when
 poll keeps the last data and marks the header "Connection lost"; the five
 endpoints render independently, so one failing marks only its half stale;
 polls are chained with `setTimeout` and each request times out after 4 s, so
-they never overlap; a 401 shows a persistent "session expired" banner that
-the next successful response clears), and a **Config** tab that is
+they never overlap; a 401 from any API call shows a persistent "session expired" banner with a link
+to the login page, which the next successful response clears), and a **Config** tab that is
 read-only: it shows `/api/config/raw` in a readonly textarea, and a candidate
 textarea whose **Validate** button POSTs to `/api/config/validate` and shows
 the errors or the restart-only keys, next to a client-side line diff (an LCS
@@ -3957,27 +4023,40 @@ admitted peer over either gets 503 + `Retry-After` (§7.1).
 The binding table holds at most 20000 bindings and 10 per AoR
 (`defaultMaxBindings`, `defaultMaxPerAOR`, `location.go:89-90`).
 
-**Admin.** One bcrypt Basic-Auth realm over the WebUI, `/metrics` and every
-`/api/*` route, with `/healthz` the only unauthenticated route. bcrypt cost
-≥ 10 is enforced at config load. A missing `Authorization` header is refused
+**Admin.** One bcrypt-checked admin login over the WebUI, `/metrics` and every
+`/api/*` route, accepted as a session cookie (browser, §13.4) or Basic
+credentials (Prometheus, curl), with `/healthz` the only unauthenticated API
+route (`/api/login` and `/api/logout` are the sign-in itself, and the login
+page and its four assets are served without credentials, §13.7). bcrypt cost
+≥ 10 is enforced at config load. A request with no credentials is refused
 before any bcrypt work and not counted as a failure. Failure limiting is
-10/minute per IPv4 address or IPv6 /64, reserved before bcrypt so concurrency
-cannot exceed it; credentials already verified keep working while their source
-is locked out (§13.4). A non-loopback `admin.listen` is a **hard validation
+10/minute per IPv4 address or IPv6 /64, shared by Basic and `/api/login`,
+reserved before bcrypt so concurrency cannot exceed it; credentials already
+verified and live sessions keep working while their source is locked out
+(§13.4). A non-loopback `admin.listen` is a **hard validation
 error** unless `admin.allow_remote: true`, which in turn requires the
 top-level `tls` and serves HTTPS. `Cache-Control: no-store` on every response
 but `/healthz`; `nosniff`, `X-Frame-Options: DENY` and
 `Referrer-Policy: no-referrer` on every response.
 
-*Auth model (decision, #120).* The admin stays on HTTP Basic Auth. There is no
-login page, no logout and no idle timeout: the session ends when the browser
-forgets the credentials (closing it, or a 401 that makes it re-prompt), and
-the server separately remembers credentials it has verified for **1 hour**
-after their last use (`verifiedCredsTTL`, `server.go:485`; §13.4), so a
-credential that is still cached by a browser keeps working for that long.
-Cookie sessions with CSRF tokens were weighed and not built: the Host and
-Origin checks below close the two web attacks Basic Auth leaves open, and
-Prometheus scrapes with Basic Auth anyway.
+*Auth model (decision, #200, supersedes #120).* #120 kept HTTP Basic Auth with
+no login page, no logout and no idle timeout. That left the WebUI behind the
+browser's native dialog, which does not follow the design tokens, cannot log
+out and is handled badly by password managers. #200 adds a cookie session for
+the browser only: a login form posting to `POST /api/login`, an in-memory
+session (idle 30 min, absolute 12 h, at most 8, `session.go:17-27`, §13.4) and
+`POST /api/logout`. What is kept, and why: Basic Auth stays on `/metrics`,
+`/api/*` and `/debug/pprof`, because Prometheus and curl cannot use a form;
+the Host and Origin checks below stay as they are and are the CSRF defence
+(with `SameSite=Strict`), so no token is added; the login reuses the same
+limiter and audit events, so a session gives a guesser no extra budget; and the
+`verifiedCreds` cache (**1 hour** after last use, `verifiedCredsTTL`,
+`server.go:582`; §13.4) still serves Basic clients. A form that only collected
+the password and sent `Authorization` from script was rejected: script would
+have to hold the password, and the page's own assets would still need auth to
+load. Limits: sessions are lost on restart; an open dashboard polls and so
+keeps its session alive until the 12 h bound; a browser still holding cached
+Basic credentials is not made to forget them by "Log out".
 
 *Host check* (`guardMW`, `hostPolicy`, `guard.go`), on every route except
 `/healthz`, before any auth work (no bcrypt, no limiter slot): a `Host` that
@@ -4183,6 +4262,9 @@ code constant.
 | admin shutdown drain | 5 s | in-flight HTTP requests |
 | admin auth-failure window | 1 min | 10 failures per source |
 | admin verified-credential memory | 1 h after last use | at most 16 entries |
+| `sessionIdleTimeout` | 30 min after the last request | an admin session cookie (`session.go:19`, §13.4) |
+| `sessionMaxAge` (`session.go:22`) | 12 h after login | the absolute bound on an admin session, whatever its activity |
+| `sessionMax` (`session.go:25`) | 8 live sessions | a login past the cap evicts the oldest |
 
 ### 15.3 Component fatal errors
 
@@ -4356,4 +4438,4 @@ Stated because the code establishes them, not as future work.
 | `internal/media` | port pools, latching, the payload-agnostic relay, the silence watchdog, the ICE-lite/DTLS-SRTP browser leg, the per-process DTLS identity, packet/byte counters | SIP, SDP, or any protocol above UDP. Its doc: "It knows nothing about SIP" |
 | `internal/shield` | the in-memory ban table, per-source token buckets, scanner signatures, the carrier-source predicate hook | kernel firewall state; being a hard dependency of anything |
 | `internal/edge` | proxy dialogs keyed by Call-ID and both tags, the client binding table, the carrier directory (DNS) and carrier registration table, switch-node routing with cooldown, switch-request classification, topology hiding on carrier legs, admission, RFC 3261 §16 forwarding mechanics, media anchoring and SDP construction | carrier accounts, routing or credentials; any B2BUA call state |
-| `internal/admin` | HTTP routing, Basic auth and its limiter, the Prometheus registry and collector, the redacted config view, the raw config round-trip, the embedded WebUI | reading edge state directly — everything arrives through `admin.Deps` closures built in `internal/app` |
+| `internal/admin` | HTTP routing, Basic auth, cookie sessions (login, logout) and their shared limiter, the Prometheus registry and collector, the redacted config view, the raw config round-trip, the embedded WebUI | reading edge state directly — everything arrives through `admin.Deps` closures built in `internal/app` |

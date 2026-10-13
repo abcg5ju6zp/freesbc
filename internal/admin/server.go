@@ -203,6 +203,7 @@ type Server struct {
 	hosts    *hostPolicy      // accepted Host header values
 	limiter  authLimiter      // per-source auth-failure rate limit
 	verified verifiedCreds    // credentials already verified by bcrypt
+	sessions sessionStore     // live cookie sessions (session.go)
 	audit    auditLog         // bounded ring of auth events (audit.go)
 	health   healthTracker    // active conditions and their history (health.go)
 	now      func() time.Time // test seam for the limiter clock; nil is time.Now
@@ -231,7 +232,11 @@ func New(cfg *config.AdminConfig, tlsCfg *config.TLSConfig, store *config.Store,
 // handler composes the mux with the recover, Host/Origin guard and (per-route) auth middleware.
 func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", s.handleHealthz) // no auth
+	mux.HandleFunc("/healthz", s.handleHealthz)   // no auth
+	mux.HandleFunc("/api/login", s.handleLogin)   // the sign-in itself: no requireAuth
+	mux.HandleFunc("/api/logout", s.handleLogout) // idempotent: no requireAuth
+	mux.HandleFunc("/login", s.handleLoginPage)   // no auth
+	mux.HandleFunc("/assets/", s.handleAssets)    // login.js, tokens.css, ui.css, theme.js: no auth
 	mux.HandleFunc("/metrics", s.requireAuth(s.handleMetrics))
 	mux.HandleFunc("/api/status", s.requireAuth(s.handleStatus))
 	mux.HandleFunc("/api/calls", s.requireAuth(s.handleCalls))
@@ -350,10 +355,13 @@ func (s *Server) Run(ctx context.Context) error {
 // (admin is restart-only, so there is no hot password rotation).
 func (s *Server) requireAuth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if s.hasSession(r) {
+			h(w, r)
+			return
+		}
 		user, pass, ok := r.BasicAuth()
 		if !ok {
-			w.Header().Set("WWW-Authenticate", `Basic realm="freesbc"`)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			noCredentials(w, r)
 			return
 		}
 		hash := s.cfg.PasswordHash
@@ -387,6 +395,24 @@ func (s *Server) requireAuth(h http.HandlerFunc) http.HandlerFunc {
 		s.audit.record(AuditLoginOK, ip, AuditResultOK)
 		h(w, r)
 	}
+}
+
+// noCredentials answers a request that carries neither a live session nor
+// Basic credentials. It runs no bcrypt and counts no failure. A browser
+// navigation is sent to the login page; another browser request (any
+// Sec-Fetch-Mode, such as fetch) gets a bare 401, so neither can raise the
+// native Basic dialog; a client with no Sec-Fetch-Mode (curl, Prometheus)
+// gets the Basic challenge.
+func noCredentials(w http.ResponseWriter, r *http.Request) {
+	mode := r.Header.Get("Sec-Fetch-Mode")
+	switch {
+	case mode == "navigate" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	case mode == "":
+		w.Header().Set("WWW-Authenticate", `Basic realm="freesbc"`)
+	}
+	http.Error(w, "unauthorized", http.StatusUnauthorized)
 }
 
 // newHTTPServer builds the http.Server: IdleTimeout reclaims keep-alive

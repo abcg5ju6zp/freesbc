@@ -101,14 +101,14 @@ const (
 //
 // The check keys on the transport source only, never on From or any
 // identity header, so it cannot be talked past by a spoofed header.
-func (s *Server) admitPublicInvite(req *sip.Request, src netip.AddrPort) (inviteSource, string) {
+func (s *Server) admitPublicInvite(req *sip.Request, src netip.AddrPort) (inviteSource, string, *carrierGen) {
 	if s.loc.HasSource(sip.NetworkToLower(req.Transport()), src) {
-		return srcClient, ""
+		return srcClient, "", nil
 	}
-	if name, ok := s.carriers.snapshot().carrierFor(src, sip.NetworkToLower(req.Transport())); ok {
-		return srcCarrier, name
+	if name, gen, ok := s.carriers.sourceGen(src, sip.NetworkToLower(req.Transport())); ok {
+		return srcCarrier, name, gen
 	}
-	return srcDrop, ""
+	return srcDrop, "", nil
 }
 
 // outOfDialogVerdict is what admitPublicOutOfDialog decides.
@@ -159,7 +159,7 @@ func (s *Server) admitPublicOutOfDialog(req *sip.Request, src netip.AddrPort, re
 // Anyone else is counted under dropDialogless and the handler answers 481,
 // the same answer a REFER, MESSAGE or NOTIFY naming no dialog gets.
 func (s *Server) admitDialogless(req *sip.Request, src netip.AddrPort) bool {
-	if kind, _ := s.admitPublicInvite(req, src); kind != srcDrop {
+	if kind, _, _ := s.admitPublicInvite(req, src); kind != srcDrop {
 		return true
 	}
 	// dropSilently counts, logs and strikes the source (admission_ban,

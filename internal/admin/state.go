@@ -69,10 +69,49 @@ type Carrier struct {
 	Transport  string
 	Mode       string // "literal", "srv", "a", or "" until resolved
 	Addresses  []CarrierAddress
-	ResolvedAt time.Time // zero for a literal or unresolved carrier
-	ExpiresAt  time.Time
-	Failing    bool
-	LastError  string
+	// GenerationID is the current address generation, 0 while
+	// unresolved.
+	GenerationID uint64
+	// Generations is the address-generation ledger: the current one,
+	// retained generations still carrying pinned traffic, and the most
+	// recently retired or closed ones.
+	Generations []CarrierGeneration
+	ResolvedAt  time.Time // zero for a literal or unresolved carrier
+	ExpiresAt   time.Time
+	Failing     bool
+	LastError   string
+}
+
+// CarrierGenRefs is what still pins one carrier address generation.
+type CarrierGenRefs struct {
+	Connections   int
+	Registrations int
+	Dialogs       int
+	Transactions  int
+}
+
+// CarrierGenHandoff is one recorded generation transition.
+type CarrierGenHandoff struct {
+	At         time.Time
+	Kind       string // superseded, retained, readopted, retired, closed
+	Generation uint64 // the other generation in the handoff
+	Detail     string
+}
+
+// CarrierGeneration is the operator view of one address generation.
+type CarrierGeneration struct {
+	ID      uint64
+	State   string // current, retained, retired, closed
+	Mode    string // literal, srv, a
+	Born    string // literal, startup, refresh, switchback
+	Addresses []string
+	ResolvedAt   time.Time
+	SupersededAt time.Time
+	RetiredAt    time.Time
+	ClosedAt     time.Time
+	SupersededBy uint64
+	Refs         CarrierGenRefs
+	Handoffs     []CarrierGenHandoff
 }
 
 const (

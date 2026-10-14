@@ -927,6 +927,17 @@ func (s *Server) sendMiddleBye(b byeInfo) {
 		if toward, ok = s.topo.publicSide(b.transport); !ok {
 			return
 		}
+		if b.carrier && streamIndex(b.transport) >= 0 {
+			// A stream BYE must leave on the generation the dialog was
+			// pinned to; if none is live any more the local teardown
+			// has nothing to deliver. UDP has no dial gate (and a
+			// carrier_sources-only "unknown" carrier has no gen).
+			_, gen, found := s.carriers.genByDest(b.transport, b.remote)
+			if !found || !s.carriers.acquire(gen, refTx) {
+				return
+			}
+			defer s.carriers.release(gen, refTx)
+		}
 	}
 	if b.remote == "" {
 		return

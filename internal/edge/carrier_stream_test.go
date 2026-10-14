@@ -362,7 +362,7 @@ func startStreamRig(t *testing.T, o streamRigOpts) *streamRig {
 	h.run()
 	rig := &streamRig{carrierRig: &carrierRig{harness: h, cs: cs}, carrier: carrier}
 	waitFor(t, 5*time.Second, "the carrier to resolve", func() bool {
-		_, ok := h.srv.carrierDest("alpha")
+		_, _, ok := h.srv.carrierDest("alpha")
 		return ok
 	})
 	return rig

@@ -47,10 +47,11 @@ const maxEarlyPerSource = 64
 func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction, in inbound) {
 	src := in.src
 	inDialog := isInDialog(req)
-	carrier := "" // the carrier a public out-of-dialog INVITE came from, if any
+	carrier := ""          // the carrier a public out-of-dialog INVITE came from, if any
+	var carrierGen *carrierGen // the address generation it was admitted from
 	if !inDialog && !in.private() {
 		var kind inviteSource
-		if kind, carrier = s.admitPublicInvite(req, src); kind == srcDrop {
+		if kind, carrier, carrierGen = s.admitPublicInvite(req, src); kind == srcDrop {
 			// Admission (issue #86; admission.go): a public out-of-dialog
 			// INVITE from a source that is neither a carrier source nor a
 			// registered transport address is dropped before anything
@@ -75,7 +76,7 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction, in inbound
 		s.invitePrivate(req, tx)
 		return
 	}
-	s.inviteToUpstream(req, tx, src, carrier)
+	s.inviteToUpstream(req, tx, src, carrier, carrierGen)
 }
 
 // inviteReject is why the edge itself refused an out-of-dialog INVITE with a
@@ -285,7 +286,7 @@ func (s *Server) beginDialog(req *sip.Request, tx sip.ServerTransaction, callerP
 //     Request-URI is left alone, and the request is stamped
 //     X-FreeSBC-Carrier. Carriers are exempt from the per-source early-call
 //     cap; shield.carrier_rate_limit bounds them.
-func (s *Server) inviteToUpstream(req *sip.Request, tx sip.ServerTransaction, src netip.AddrPort, carrier string) {
+func (s *Server) inviteToUpstream(req *sip.Request, tx sip.ServerTransaction, src netip.AddrPort, carrier string, gen *carrierGen) {
 	from, ok := s.publicSideFor(req)
 	if !ok {
 		s.rejectInvite(req, tx, 488, "Not Acceptable Here", rejectNoPublicSide)
@@ -321,7 +322,16 @@ func (s *Server) inviteToUpstream(req *sip.Request, tx sip.ServerTransaction, sr
 	}
 	defer d.endUnlessUp()
 	if carrier != "" {
+		// Pin the call to the generation the INVITE arrived from. A
+		// generation that retired in the admission window is refused:
+		// its address is no longer a carrier source.
+		if gen != nil && !s.carriers.acquire(gen, refDialog) {
+			d.end(endShutdown)
+			s.dropSilently(dropInviteNotAdmitted, req, src, "to", req.Recipient.User)
+			return
+		}
 		d.setCarrier(carrier)
+		d.setCarrierGen(gen)
 	}
 	d.setSRTP(s.legSRTPPolicy(carrier, from.transport))
 

@@ -268,6 +268,15 @@ func New(store *config.Store, log *slog.Logger, opts ...Option) (*Server, error)
 	s.pubPool, s.privPool = newMediaPools(cfg, topo, s.mediaTimeout)
 	s.dialogs = newDialogTable(s.metrics, s.log)
 	s.subs = newSubTable(s.metrics)
+	// Generation pins: a registration, a dialog or a pooled carrier
+	// connection keeps the address generation it was created on alive
+	// until it ends (carriergen.go).
+	s.carrierRegs.acquireGen = func(g *carrierGen) bool { return s.carriers.acquire(g, refReg) }
+	s.carrierRegs.releaseGen = func(g *carrierGen) { s.carriers.release(g, refReg) }
+	s.dialogs.releaseGen = func(g *carrierGen) { s.carriers.release(g, refDialog) }
+	// A retired generation closes the pooled connections no remaining
+	// generation names (carriergen.go); srv is nil before Run.
+	s.carriers.closeConn = s.closePooledConn
 	// A subscription belongs to a registration binding: when the binding
 	// goes (un-REGISTER, WebSocket close, expiry) its records go too.
 	s.loc.SetOnRemove(s.subs.dropTokens)
@@ -759,6 +768,10 @@ func (s *Server) Run(ctx context.Context) error {
 	s.subs.close()
 	listenCancel()
 	wg.Wait()
+	// No new lookup or dial is possible with every listener closed;
+	// record the final handoff of every generation still live, keeping
+	// the ledger queryable through the last moment of shutdown.
+	s.carriers.shutdown()
 	s.dialogs.closeAll()
 	s.subs.closeAll()
 	return runErr
@@ -1112,6 +1125,21 @@ func (s *Server) onTxAck(ack *sip.Request, tx *finalTracker) {
 	// still carries the internal arrival marker).
 	s.log.Debug("ACK to a non-2xx final absorbed",
 		"sip_call_id", fsip.CallID(ack), "status", tx.final.Load())
+}
+
+// closePooledConn closes one pooled stream connection, the generation
+// retirement hook: an old address set with no pins left must not keep a
+// dialed carrier connection open. GetConnection takes a reference; Close
+// drops the connection regardless of references.
+func (s *Server) closePooledConn(network, addr string) {
+	if s.srv == nil {
+		return
+	}
+	c, err := s.srv.TransportLayer().GetConnection(network, addr)
+	if err != nil || c == nil {
+		return
+	}
+	_ = c.Close()
 }
 
 // closeStream hard-closes the tcp/tls/ws/wss connection from raddr, if

@@ -137,27 +137,13 @@ func (cc *carrierConns) destLock(dest string) *sync.Mutex {
 	return m
 }
 
-// carrierTarget names the tcp or tls carrier whose resolved address is dest,
-// for a request leaving over network. It is the only case FreeSBC dials a
-// stream connection: a client's flow is never dialed (requireFlow).
-func (s *Server) carrierTarget(network, dest string) (string, bool) {
-	snap := s.carriers.snapshot()
-	for _, name := range snap.names {
-		if snap.transports[name] != network {
-			continue
-		}
-		for _, a := range snap.addrs[name] {
-			if a.String() == dest {
-				return name, true
-			}
-		}
-	}
-	return "", false
-}
-
 // ensure returns once sipgo's pool holds a connection to dest, dialing the
-// carrier when it holds none. It does not hold a reference to it.
-func (cc *carrierConns) ensure(ctx context.Context, name, network, dest string) error {
+// carrier when it holds none. gen is the live (current or retained)
+// generation the destination belongs to: the dial guard in requireFlow
+// already refused a destination only a retired generation named, so this
+// never redials an address that lost its carrier qualification. The
+// established connection pins gen (refConn, released on its Close).
+func (cc *carrierConns) ensure(ctx context.Context, name, network, dest string, gen *carrierGen) error {
 	m := cc.destLock(dest)
 	m.Lock()
 	defer m.Unlock()
@@ -166,7 +152,7 @@ func (cc *carrierConns) ensure(ctx context.Context, name, network, dest string) 
 		_, _ = c.TryClose()
 		return nil
 	}
-	err := cc.dial(ctx, name, network, dest)
+	err := cc.dial(ctx, name, network, dest, gen)
 	if err != nil {
 		cc.s.log.Warn("carrier connection failed",
 			"carrier", name, "transport", network, "dest", dest, "err", err)
@@ -193,8 +179,10 @@ func (cc *carrierConns) ensure(ctx context.Context, name, network, dest string) 
 	}
 }
 
-// dial opens, handshakes and hands over one connection to a carrier.
-func (cc *carrierConns) dial(ctx context.Context, name, network, dest string) error {
+// dial opens, handshakes and hands over one connection to a carrier. The
+// connection is pinned to the generation it was opened for from the
+// moment sipgo can take it; its own Close releases that pin.
+func (cc *carrierConns) dial(ctx context.Context, name, network, dest string, gen *carrierGen) error {
 	s := cc.s
 	lim := s.streamLim
 	ap, err := netip.ParseAddrPort(dest)
@@ -222,7 +210,8 @@ func (cc *carrierConns) dial(ctx context.Context, name, network, dest string) er
 		_ = raw.Close()
 		return fmt.Errorf("connection cap reached (%s)", streamRefusalLabels[why])
 	}
-	c := &streamConn{Conn: raw, l: l, ap: ap, remote: dest, lim: lim, fr: &sipFramer{max: lim.maxMessage}, carrier: true}
+	c := &streamConn{Conn: raw, l: l, ap: ap, remote: dest, lim: lim, fr: &sipFramer{max: lim.maxMessage},
+		carrier: true, gen: gen}
 	s.metrics.StreamConnOpened(network)
 	if network == config.CarrierTLS {
 		tc := tls.Client(raw, cc.tls[name])
@@ -237,6 +226,14 @@ func (cc *carrierConns) dial(ctx context.Context, name, network, dest string) er
 	}
 	select {
 	case l.ready <- c:
+		// Pin the generation for the connection's life now that sipgo
+		// is about to pool it. If the generation retired in the dial's
+		// handshake window, fail the dial and let streamConn.Close undo
+		// nothing: it is closed here before a pin was taken.
+		if gen != nil && !cc.s.carriers.acquire(gen, refConn) {
+			_ = c.Close()
+			return errCarrierGenGone
+		}
 		return nil
 	case <-l.done:
 		_ = c.Close()
@@ -246,3 +243,7 @@ func (cc *carrierConns) dial(ctx context.Context, name, network, dest string) er
 		return ctx.Err()
 	}
 }
+
+// errCarrierGenGone is the dial failure for a destination whose
+// generation retired while the connection was opening.
+var errCarrierGenGone = errors.New("carrier destination generation retired")

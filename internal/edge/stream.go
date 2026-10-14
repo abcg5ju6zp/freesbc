@@ -348,6 +348,13 @@ func (l *streamListener) prepare(raw net.Conn) {
 		return
 	}
 	c := &streamConn{Conn: raw, l: l, ap: ap, remote: raw.RemoteAddr().String(), lim: lim, carrier: carrier}
+	// A connection accepted from a carrier gateway's address belongs to
+	// that live generation (the carrier may also open connections to
+	// FreeSBC itself): pin it so a DNS handoff cannot revoke its source
+	// qualification or close it from under pinned calls.
+	if _, g, ok := s.carriers.sourceGen(ap, l.transport); ok && g != nil && s.carriers.acquire(g, refConn) {
+		c.gen = g
+	}
 	s.metrics.StreamConnOpened(l.transport)
 	if sh := s.currentShield(); sh != nil && !sh.AllowRate(ip) {
 		// A connection costs the token a datagram does, so a flood of
@@ -397,6 +404,10 @@ type streamConn struct {
 	// carrier is whether the connection is to or from a carrier, which
 	// decides the connection cap it was counted against.
 	carrier bool
+	// gen is the carrier address generation the connection pins while
+	// open (refConn); nil for a non-carrier connection. Released in
+	// Close.
+	gen *carrierGen
 
 	// pending is data already read from the connection that sipgo has yet
 	// to see: the WebSocket upgrade request, received during prepare.
@@ -556,6 +567,13 @@ func (c *streamConn) Close() error {
 		s := c.l.s
 		s.streams.release(c.ap.Addr(), c.carrier)
 		s.metrics.StreamConnClosed(c.l.transport)
+		// Release the generation pin before the connection can be
+		// pooled again: it is the reference a superseded generation
+		// waits on before closing its connections.
+		if c.gen != nil {
+			s.carriers.release(c.gen, refConn)
+			c.gen = nil
+		}
 		if n := s.loc.RemoveBySourceOn(c.l.transport, c.ap); n > 0 {
 			s.metrics.SetRegistrations(s.loc.Count())
 			s.log.Debug("stream connection closed; dropped its registration bindings",

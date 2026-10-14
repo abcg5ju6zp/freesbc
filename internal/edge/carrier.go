@@ -195,7 +195,7 @@ func (s *Server) invitePrivate(req *sip.Request, tx sip.ServerTransaction) {
 // the carrier is offered a public anchor port, the switch is answered with
 // a private one.
 func (s *Server) inviteToCarrier(req *sip.Request, tx sip.ServerTransaction, carrier string) {
-	dest, ok := s.carrierDest(carrier)
+	dest, gen, ok := s.carrierDest(carrier)
 	if !ok {
 		s.log.Warn("carrier has no resolved address", "carrier", carrier, "sip_call_id", fsip.CallID(req))
 		s.rejectInvite(req, tx, 503, "Service Unavailable", rejectNoTarget)
@@ -217,7 +217,16 @@ func (s *Server) inviteToCarrier(req *sip.Request, tx sip.ServerTransaction, car
 		return
 	}
 	defer d.endUnlessUp()
+	// Pin the call to the CURRENT generation the new INVITE selected:
+	// every in-dialog request, ACK, BYE and the proxy's own teardown stay
+	// on this carrier, transport and target address, whatever a later
+	// refresh resolves.
+	if !s.carriers.acquire(gen, refDialog) {
+		s.rejectInvite(req, tx, 503, "Service Unavailable", rejectNoTarget)
+		return
+	}
 	d.setCarrier(carrier)
+	d.setCarrierGen(gen)
 	d.setSRTP(s.legSRTPPolicy(carrier, ""))
 
 	// An offerless INVITE is forwarded as it is: the offer is the
@@ -303,12 +312,21 @@ func (s *Server) inviteToCarrier(req *sip.Request, tx sip.ServerTransaction, car
 // gateway keepalive): forwarded to the carrier's first resolved address
 // with the signaling hidden, and the carrier's answer relayed back.
 func (s *Server) optionsToCarrier(req *sip.Request, tx sip.ServerTransaction, carrier string) {
-	dest, ok := s.carrierDest(carrier)
+	// A keepalive is a new stateless request: the current generation
+	// only, never one a refresh superseded.
+	dest, gen, ok := s.carrierDest(carrier)
 	pub, pubOK := s.carrierSide(carrier)
 	if !ok || !pubOK {
 		s.reject(req, tx, 503, "Service Unavailable")
 		return
 	}
+	// Pin the exchange so a handoff in its 32 s window leaves the
+	// connection and the source qualification of the answer intact.
+	if !s.carriers.acquire(gen, refTx) {
+		s.reject(req, tx, 503, "Service Unavailable")
+		return
+	}
+	defer s.carriers.release(gen, refTx)
 	out, err := s.prepareForwardHidden(req, s.topo.private, pub, dest, false)
 	if err != nil {
 		s.reject(req, tx, 483, "Too Many Hops")

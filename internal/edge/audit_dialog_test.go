@@ -87,7 +87,7 @@ func TestAuditDialogConfirmedBeforeRelay(t *testing.T) {
 		req.SetSource(phone.local)
 		src, _ := fsip.SourceAddrPort(req)
 
-		auditExpectConfirmedAtRelay(t, h, func(tx sip.ServerTransaction) { h.srv.inviteToUpstream(req, tx, src, "") })
+		auditExpectConfirmedAtRelay(t, h, func(tx sip.ServerTransaction) { h.srv.inviteToUpstream(req, tx, src, "", nil) })
 	})
 }
 

@@ -79,8 +79,10 @@ func newTestDirectory(stub *dnsStub, clk *fakeClock, static []netip.Prefix, carr
 		lookupIP:  stub.lookupIP,
 		now:       clk.now,
 		entries:   map[string]*carrierEntry{},
+		statics:   map[string]*carrierGen{},
 		rnd:       rand.New(rand.NewSource(1)),
 	}
+	d.buildStatics()
 	d.publish()
 	return d
 }
@@ -261,12 +263,20 @@ func TestCarrierDirectoryNegativeCache(t *testing.T) {
 }
 
 func TestCarrierSnapshotCarrierFor(t *testing.T) {
+	gen := func(carrier, transport string, addrs ...netip.AddrPort) *carrierGen {
+		return &carrierGen{carrier: carrier, transport: transport, addrs: addrs, state: genCurrent}
+	}
 	snap := &carrierSnapshot{
 		names: []string{"alpha", "beta", "tlsco"},
 		addrs: map[string][]netip.AddrPort{
 			"alpha": {ap("192.0.2.1:5060")},
 			"beta":  {ap("192.0.2.1:5070"), ap("192.0.2.2:5060")},
 			"tlsco": {ap("192.0.2.9:5061")},
+		},
+		live: map[string][]*carrierGen{
+			"alpha": {gen("alpha", "udp", ap("192.0.2.1:5060"))},
+			"beta":  {gen("beta", "udp", ap("192.0.2.1:5070"), ap("192.0.2.2:5060"))},
+			"tlsco": {gen("tlsco", "tls", ap("192.0.2.9:5061"))},
 		},
 		transports: map[string]string{"alpha": "udp", "beta": "udp", "tlsco": "tls"},
 		nets: []netip.Prefix{netip.MustParsePrefix("192.0.2.1/32"), netip.MustParsePrefix("192.0.2.2/32"),

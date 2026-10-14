@@ -205,8 +205,29 @@ func adminDeps(edgeSrv *edge.Server, version string, running *config.Config, sto
 				for _, a := range c.Addresses {
 					addrs = append(addrs, admin.CarrierAddress{Address: a.Address, InUse: a.InUse})
 				}
+				gens := make([]admin.CarrierGeneration, 0, len(c.Generations))
+				for _, g := range c.Generations {
+					handoffs := make([]admin.CarrierGenHandoff, 0, len(g.Handoffs))
+					for _, h := range g.Handoffs {
+						handoffs = append(handoffs, admin.CarrierGenHandoff{
+							At: h.At, Kind: h.Kind, Generation: h.Generation, Detail: h.Detail,
+						})
+					}
+					gens = append(gens, admin.CarrierGeneration{
+						ID: g.ID, State: g.State, Mode: g.Mode, Born: g.Born,
+						Addresses: g.Addresses, ResolvedAt: g.ResolvedAt,
+						SupersededAt: g.SupersededAt, RetiredAt: g.RetiredAt, ClosedAt: g.ClosedAt,
+						SupersededBy: g.SupersededBy,
+						Refs: admin.CarrierGenRefs{
+							Connections: g.Refs.Connections, Registrations: g.Refs.Registrations,
+							Dialogs: g.Refs.Dialogs, Transactions: g.Refs.Transactions,
+						},
+						Handoffs: handoffs,
+					})
+				}
 				out = append(out, admin.Carrier{Name: c.Name, Host: c.Host, Transport: c.Transport,
-					Mode: c.Mode, Addresses: addrs, ResolvedAt: c.ResolvedAt, ExpiresAt: c.ExpiresAt,
+					Mode: c.Mode, Addresses: addrs, GenerationID: c.GenerationID, Generations: gens,
+					ResolvedAt: c.ResolvedAt, ExpiresAt: c.ExpiresAt,
 					Failing: c.Failing, LastError: c.LastError})
 			}
 			return out

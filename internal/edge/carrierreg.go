@@ -39,42 +39,95 @@ type carrierBinding struct {
 	node    string  // edge.switch node name ("IP:port")
 	contact sip.Uri // the switch's original Contact
 	expires time.Time
+	// gen is the address generation the registration was made through.
+	// Every refresh and the un-REGISTER are pinned to the same carrier,
+	// transport and target address the binding's Contact lives at, and
+	// the binding pins that generation (refReg) until it expires.
+	gen *carrierGen
 }
 
 // carrierRegTable is the set of live carrier registrations by token.
 type carrierRegTable struct {
 	mu      sync.Mutex
 	byToken map[string]carrierBinding
+	// acquireGen/releaseGen balance a registration's generation pin
+	// (refReg). Wired in New; nil in standalone table tests.
+	acquireGen func(*carrierGen) bool
+	releaseGen func(*carrierGen)
 }
 
 func newCarrierRegTable() *carrierRegTable {
 	return &carrierRegTable{byToken: map[string]carrierBinding{}}
 }
 
-// put installs or refreshes a binding.
+// put installs or refreshes a binding. A binding replacing one on another
+// generation moves the registration pin; it is not stored when its
+// generation already retired.
 func (t *carrierRegTable) put(b carrierBinding) {
 	t.mu.Lock()
+	defer t.mu.Unlock()
+	old := t.byToken[b.token]
+	if old.gen != b.gen {
+		if b.gen != nil && t.acquireGen != nil && !t.acquireGen(b.gen) {
+			return // the generation retired between the 200 and now
+		}
+		if old.gen != nil && t.releaseGen != nil {
+			t.releaseGen(old.gen)
+		}
+	}
 	t.byToken[b.token] = b
-	t.mu.Unlock()
 }
 
 // remove deletes the binding with this token.
 func (t *carrierRegTable) remove(token string) {
 	t.mu.Lock()
-	delete(t.byToken, token)
+	b, ok := t.byToken[token]
+	if ok {
+		delete(t.byToken, token)
+	}
 	t.mu.Unlock()
+	if ok && b.gen != nil && t.releaseGen != nil {
+		t.releaseGen(b.gen)
+	}
 }
 
 // removeNode deletes every binding a switch node holds at a carrier (a
-// wildcard un-REGISTER).
+// wildcard un-REGISTER), releasing their generation pins.
 func (t *carrierRegTable) removeNode(carrier, node string) {
 	t.mu.Lock()
+	var gens []*carrierGen
 	for k, b := range t.byToken {
 		if b.carrier == carrier && b.node == node {
+			gens = append(gens, b.gen)
 			delete(t.byToken, k)
 		}
 	}
 	t.mu.Unlock()
+	if t.releaseGen != nil {
+		for _, g := range gens {
+			if g != nil {
+				t.releaseGen(g)
+			}
+		}
+	}
+}
+
+// nodeGens returns the distinct live generations a node's bindings at one
+// carrier are pinned to: where a wildcard un-REGISTER must go to actually
+// reach every gateway still holding the node's contacts.
+func (t *carrierRegTable) nodeGens(carrier, node string) []*carrierGen {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []*carrierGen
+	seen := map[*carrierGen]bool{}
+	for _, b := range t.byToken {
+		if b.carrier == carrier && b.node == node && b.gen != nil &&
+			time.Now().Before(b.expires) && !seen[b.gen] {
+			seen[b.gen] = true
+			out = append(out, b.gen)
+		}
+	}
+	return out
 }
 
 // lookup finds a live binding. An expired one is not found (the periodic
@@ -89,18 +142,28 @@ func (t *carrierRegTable) lookup(token string) (carrierBinding, bool) {
 	return b, true
 }
 
-// prune drops expired bindings and reports how many.
+// prune drops expired bindings, releasing their generation pins, and
+// reports how many.
 func (t *carrierRegTable) prune() int {
 	now := time.Now()
 	n := 0
+	var gens []*carrierGen
 	t.mu.Lock()
 	for k, b := range t.byToken {
 		if !now.Before(b.expires) {
+			gens = append(gens, b.gen)
 			delete(t.byToken, k)
 			n++
 		}
 	}
 	t.mu.Unlock()
+	if t.releaseGen != nil {
+		for _, g := range gens {
+			if g != nil {
+				t.releaseGen(g)
+			}
+		}
+	}
 	return n
 }
 
@@ -144,15 +207,17 @@ func carrierToken(node, contact string) string {
 	return strings.ToLower(enc[:26])
 }
 
-// carrierDest is where a request for a carrier is sent: the first resolved
-// address of its edge.carriers entry. There is no failover across a DNS
-// name's targets inside FreeSBC; the switch fails over between gateways.
-func (s *Server) carrierDest(name string) (string, bool) {
-	addrs := s.carriers.snapshot().addrs[name]
-	if len(addrs) == 0 {
-		return "", false
+// carrierDest is where a NEW request for a carrier is sent: the first
+// address of its CURRENT generation. There is no failover across a DNS
+// name's targets or across generations inside FreeSBC; the switch fails
+// over between gateways, and existing traffic stays pinned to the
+// generation it began on.
+func (s *Server) carrierDest(name string) (string, *carrierGen, bool) {
+	g, ok := s.carriers.currentGen(name)
+	if !ok || len(g.addrs) == 0 {
+		return "", nil, false
 	}
-	return addrs[0].String(), true
+	return g.addrs[0].String(), g, true
 }
 
 // switchNodeFor names the edge.switch node a request from the private
@@ -191,13 +256,14 @@ func (s *Server) carrierContactURI(pub side, user, token string) sip.Uri {
 }
 
 // registerToCarrier proxies a REGISTER the switch sent for a carrier.
+//
+// The destination is pinned by generation: a refresh or an un-REGISTER of a
+// live binding goes to the same carrier, transport and target address the
+// binding was created on (its Contact lives there and, for tcp/tls, its
+// connection is the carrier's only route back), a wildcard un-REGISTER
+// goes to every generation the node's contacts live on, and only a brand
+// new registration takes the current generation.
 func (s *Server) registerToCarrier(req *sip.Request, tx sip.ServerTransaction, in inbound, carrier string) {
-	dest, ok := s.carrierDest(carrier)
-	if !ok {
-		s.log.Warn("carrier has no resolved address", "carrier", carrier, "sip_call_id", fsip.CallID(req))
-		s.reject(req, tx, 503, "Service Unavailable")
-		return
-	}
 	pub, ok := s.carrierSide(carrier)
 	node, nodeOK := s.switchNodeFor(in.src)
 	if !ok || !nodeOK {
@@ -212,19 +278,63 @@ func (s *Server) registerToCarrier(req *sip.Request, tx sip.ServerTransaction, i
 	}
 	orig, hasContact := fsip.ContactURI(req)
 
+	// Choose the generation set before touching the message.
+	token := ""
+	var gens []*carrierGen
+	switch {
+	case wildcard:
+		gens = s.carrierRegs.nodeGens(carrier, node)
+	case hasContact:
+		token = carrierToken(node, orig.String())
+		if b, found := s.carrierRegs.lookup(token); found {
+			gens = append(gens, b.gen)
+		}
+	}
+	if len(gens) == 0 {
+		_, g, found := s.carrierDest(carrier)
+		if !found {
+			s.log.Warn("carrier has no resolved address", "carrier", carrier, "sip_call_id", fsip.CallID(req))
+			s.reject(req, tx, 503, "Service Unavailable")
+			return
+		}
+		gens = append(gens, g)
+	}
+	// Pin the destination generation(s) for the exchange itself, so a DNS
+	// handoff while the REGISTER is in flight neither retires the
+	// connection nor moves the request.
+	for _, g := range gens {
+		if !s.carriers.acquire(g, refTx) {
+			s.reject(req, tx, 503, "Service Unavailable")
+			return
+		}
+	}
+	defer func() {
+		for _, g := range gens {
+			s.carriers.release(g, refTx)
+		}
+	}()
+
+	s.metrics.CarrierRequest(carrier, dirOutbound, "REGISTER")
+	if len(gens) > 1 {
+		// A wildcard spanning a handoff: one REGISTER per gateway
+		// generation that still holds one of the node's contacts.
+		s.registerWildcard(req, tx, carrier, node, pub, gens)
+		return
+	}
+	gen := gens[0]
+	dest := gen.addrs[0].String()
+
 	out, err := s.prepareForwardHidden(req, s.topo.private, pub, dest, false)
 	if err != nil {
 		s.reject(req, tx, 483, "Too Many Hops")
 		return
 	}
-	token := ""
 	if hs := req.GetHeaders("Contact"); len(hs) > 0 {
 		if oc, isC := hs[0].(*sip.ContactHeader); isC {
 			// The Contact header keeps its own parameters (expires, q); only
 			// its address changes. A wildcard "*" goes upstream as it is.
 			c := oc.Clone()
 			if hasContact && !wildcard {
-				token = carrierToken(node, orig.String())
 				c.Address = s.carrierContactURI(pub, orig.User, token)
 			}
 			fsip.RemoveHeaders(out, "Contact")
@@ -234,7 +344,6 @@ func (s *Server) registerToCarrier(req *sip.Request, tx sip.ServerTransaction, i
 	// The Request-URI, Authorization and Call-ID are untouched: the digest
 	// the switch computed covers them.
 
-	s.metrics.CarrierRequest(carrier, dirOutbound, "REGISTER")
 	ctx, cancel := context.WithTimeout(context.Background(), registerTimeout)
 	defer cancel()
 	_, err = s.forwardAndRelay(ctx, req, tx, out, respToSwitch, func(relayed *sip.Response) error {
@@ -257,12 +366,12 @@ func (s *Server) registerToCarrier(req *sip.Request, tx sip.ServerTransaction, i
 			} else {
 				s.carrierRegs.put(carrierBinding{
 					token: token, carrier: carrier, node: node,
-					contact: orig, expires: time.Now().Add(granted),
+					contact: orig, expires: time.Now().Add(granted), gen: gen,
 				})
 			}
 			restoreContact(relayed, orig, secs)
 			s.log.Info("carrier registration", "carrier", carrier, "switch", node,
-				"expires", strconv.Itoa(secs))
+				"generation", gen.id, "expires", strconv.Itoa(secs))
 		}
 		s.publishCarrierRegistrations()
 		return nil
@@ -273,6 +382,84 @@ func (s *Server) registerToCarrier(req *sip.Request, tx sip.ServerTransaction, i
 			s.reject(req, tx, 504, "Server Time-out")
 		} else {
 			s.reject(req, tx, 503, "Service Unavailable")
+		}
+	}
+}
+
+// registerWildcard forwards a Contact:* REGISTER to every generation one
+// node's contacts are pinned to (registerToCarrier's multi-generation
+// case). Each gateway is asked in turn; exactly one final response — the
+// first 2xx, else the first final — is relayed to the switch, and the
+// local bindings of every generation are removed only when a gateway
+// accepted. Provisional responses are absorbed (sipgo's own 100 Trying
+// already went to the switch).
+func (s *Server) registerWildcard(req *sip.Request, tx sip.ServerTransaction, carrier, node string, pub side, gens []*carrierGen) {
+	ctx, cancel := context.WithTimeout(context.Background(), registerTimeout)
+	defer cancel()
+	var chosen *sip.Response
+	for _, gen := range gens {
+		dest := gen.addrs[0].String()
+		out, err := s.prepareForwardHidden(req, s.topo.private, pub, dest, false)
+		if err != nil {
+			continue
+		}
+		clTx, err := s.clientTx(ctx, out)
+		if err != nil {
+			s.log.Debug("wildcard carrier REGISTER not sent", "err", err, "carrier", carrier,
+				"generation", gen.id, "sip_call_id", fsip.CallID(req))
+			continue
+		}
+		final := s.pumpFinal(ctx, clTx)
+		clTx.Terminate()
+		if final == nil {
+			continue
+		}
+		if chosen == nil || (chosen.StatusCode/100 != 2 && final.StatusCode/100 == 2) {
+			chosen = final
+		}
+		if final.StatusCode/100 == 2 {
+			break
+		}
+	}
+	if chosen == nil {
+		if ctx.Err() != nil {
+			s.reject(req, tx, 504, "Server Time-out")
+		} else {
+			s.reject(req, tx, 503, "Service Unavailable")
+		}
+		return
+	}
+	if err := s.relayResponseHide(req, tx, chosen, respToSwitch, func(relayed *sip.Response) error {
+		if relayed.StatusCode/100 == 2 {
+			s.carrierRegs.removeNode(carrier, node)
+			fsip.RemoveHeaders(relayed, "Contact")
+			s.publishCarrierRegistrations()
+		}
+		return nil
+	}); err != nil {
+		s.log.Debug("relay wildcard REGISTER response", "err", err, "sip_call_id", fsip.CallID(req))
+	}
+}
+
+// pumpFinal reads a non-INVITE client transaction to its first final
+// (2xx–6xx) response, absorbing provisional ones and retransmissions.
+func (s *Server) pumpFinal(ctx context.Context, clTx sip.ClientTransaction) *sip.Response {
+	for {
+		select {
+		case res, ok := <-clTx.Responses():
+			if !ok {
+				return nil
+			}
+			if !fsip.Forwardable(res) {
+				continue
+			}
+			if res.StatusCode >= 200 {
+				return res
+			}
+		case <-clTx.Done():
+			return nil
+		case <-ctx.Done():
+			return nil
 		}
 	}
 }

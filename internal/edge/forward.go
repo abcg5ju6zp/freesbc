@@ -306,6 +306,10 @@ var errNoFlow = errors.New("proxy: no connection to the client")
 // The one exception is a tcp or tls carrier: its destination is an address
 // FreeSBC resolved from edge.carriers, so a missing connection is dialed
 // here (carrierconn.go) with that carrier's TLS settings, never by sipgo.
+// The destination may name a RETAINED generation — it is pinned by the
+// dialog, registration or transaction the request belongs to — but never a
+// retired one, so traffic bound to an old address keeps flowing while a
+// brand-new request naming an address no generation holds fails.
 func (s *Server) requireFlow(ctx context.Context, req *sip.Request) error {
 	network := sip.NetworkToLower(req.Transport())
 	if streamIndex(network) < 0 {
@@ -316,8 +320,8 @@ func (s *Server) requireFlow(ctx context.Context, req *sip.Request) error {
 		_, _ = c.TryClose() // GetConnection took a reference; hand it back
 		return nil
 	}
-	if name, ok := s.carrierTarget(network, req.Destination()); ok {
-		return s.carrierConns.ensure(ctx, name, network, req.Destination())
+	if name, gen, ok := s.carriers.genByDest(network, req.Destination()); ok {
+		return s.carrierConns.ensure(ctx, name, network, req.Destination(), gen)
 	}
 	return errNoFlow
 }

@@ -146,7 +146,7 @@ Created once, alive for the process lifetime:
 | `edge.Server` | edge | `edge.New` (`app.go:58`) | binds nothing until `Run`; keeps its startup snapshot as `boot` |
 | `edge.topology` | edge | `edge.New` (`edge.go:230`) | immutable snapshot, built once from `boot` and the private socket |
 | `edge.pubPool` / `privPool` | edge, media | `newMediaPools` (`edge.go:268`, `mediapool.go:19`) | two `media.PlanePool`s over the one `rtp` range, bound to `public.bind` and the private IP; separate port namespaces |
-| `edge.carrierDirectory` | edge | `edge.New` (`edge.go:242`) | carrier name to addresses, plus the carrier source set; refreshed by a goroutine started in `Run` (`carrierdns.go`) |
+| `edge.carrierDirectory` | edge | `edge.New` (`edge.go:242`) | carrier name to address generations (current + retained), plus the carrier source set; refreshed by a goroutine started in `Run` (`carrierdns.go`, `carriergen.go`) |
 | `edge.carrierRegTable` | edge | `edge.New` (`edge.go:244`) | carrier registration token to binding (`carrierreg.go`) |
 | `edge.Location` | edge | `edge.New` (`edge.go:245`) | client registration binding table |
 | `edge.dialogTable` | edge | `edge.New` (`edge.go:269`) | grouped by Call-ID, matched on Call-ID + both tags |
@@ -574,9 +574,26 @@ Every header whose name starts with `x-freesbc-` (any case) is internal. Only Fr
 - A literal-IP entry is static: one address, the entry's port.
 - A DNS-name entry without a port resolves through SRV ordered by priority and RFC 2782 weight (`orderSRV`, `carrierdns.go:334`), then A/AAAA per target (the SRV name is `_sip._udp`, `_sip._tcp` or `_sips._tcp` for a udp, tcp or tls carrier, `srvName`); with no SRV record it falls back to A/AAAA on the carrier's default port, 5060 (5061 for tls; `Carrier.DialPort`). An entry with an explicit port skips SRV and resolves A/AAAA only (RFC 3263 §4.2; `resolve`, `carrierdns.go:258`).
 - Resolution runs on the public side only; the switch is never asked and the private leg does no DNS.
-- A good answer is cached `carrierDNSTTL` = 300 s; a failed or empty one `carrierDNSNegTTL` = 10 s; one query is bounded by `carrierLookupTimeout` = 3 s (`carrierdns.go:40-51`). A failed refresh keeps the last good set (`refresh`, `carrierdns.go:238`), logged at WARN once per failure run. A failure at startup is not fatal: the carrier is unresolved, its INVITEs are dropped by admission and requests for it get 503, until a lookup succeeds.
-- `Run` (started from `edge.Run`, `edge.go:741`) refreshes once at start and then every 5 s checks which entries have expired (`carrierdns.go:242`). Each refresh publishes an immutable `carrierSnapshot` through an atomic pointer, so admission and the shield read it without locking.
-- A request to a carrier goes to the first resolved address only (`carrierDest`, `carrierreg.go:149`). There is no failover across SRV targets or addresses inside FreeSBC; line selection and failover belong to the switch. The order of a resolved set is re-drawn at each refresh (weighted-random within a priority), so the first address can change every 300 s for a name with several equal-priority targets.
+- A good answer is cached `carrierDNSTTL` = 300 s; a failed or empty one `carrierDNSNegTTL` = 10 s; one query is bounded by `carrierLookupTimeout` = 3 s (`carrierdns.go:40-51`). A failed refresh keeps the last good set (`refresh`, `carrierdns.go`), logged at WARN once per failure run. A failure at startup is not fatal: the carrier is unresolved, its INVITEs are dropped by admission and requests for it get 503, until a lookup succeeds.
+- `Run` (started from `edge.Run`, `edge.go`) refreshes once at start and then every 5 s checks which entries have expired. Each refresh publishes an immutable `carrierSnapshot` through an atomic pointer, so admission and the shield read it without locking.
+- A request to a carrier goes to the first resolved address only (`carrierDest`, `carrierreg.go`). There is no failover across SRV targets or addresses inside FreeSBC; line selection and failover belong to the switch. The order of a resolved set is re-drawn at each refresh (weighted-random within a priority), but a resolution whose address SET is unchanged keeps the same generation, so the first address can only change with a handoff.
+
+#### 6.4.1 Address generations
+
+Each successful resolution that changes a carrier's address set opens a new address **generation** (`carriergen.go`), with a per-carrier monotonic id. A literal-IP carrier has one permanent (`literal`) generation. The newest generation is `current` and is the only one a new request selects (`carrierDest`). A superseded generation stays `retained` for as long as existing work is pinned to it, becomes `retired` the moment its last pin is released, and is marked `closed` at process shutdown; every transition (supersede, retain, readopt, retire, close) is recorded as a handoff on the generation and shown by `Server.Carriers()` / `/api/carriers` (last eight retired generations per carrier).
+
+A pin (`refKind`) is one of:
+
+| Pin | taken when | released when |
+|---|---|---|
+| `conn` | a tcp/tls connection to (or accepted from) a generation address is pooled (`carrierconn.go`, `stream.go`) | that connection closes |
+| `reg` | a carrier REGISTER 200 stores a binding on the generation (`carrierreg.go`) | the binding is removed, pruned or un-registered |
+| `dialog` | an INVITE to/from the carrier opens a dialog (`invite.go`, `carrier.go`) | the dialog ends (`dialog.go`) |
+| `tx` | an OPTIONS/REGISTER exchange, or a proxy-originated BYE, starts | the exchange ends |
+
+Only registrations, dialogs and exchanges keep a superseded generation alive; a connection alone is the route, not the work (`livePins`). While retained the generation's addresses stay carrier sources (admission, the shield, `streamBusy`), its pooled connections are reused for pinned traffic, and `genByDest` still authorizes a dial to them, but `carrierDest` never returns them: new INVITEs, OPTIONS and new REGISTERs take the current generation only. When the last live pin drains, connections no other live generation names are closed (`closePooledConn`) and a new snapshot revokes the old source qualification; an address shared with the current generation stays open. A failed refresh changes nothing (the current generation is the last good set), and a failed dial to a new address leaves the retained old generation untouched — there is no fallback of new traffic to an old address. When a later resolution returns the address set of a still-retained generation (a switchback) that generation is readopted as current rather than duplicated; a set that matches an already retired generation opens a fresh one.
+
+Pinned destinations: a carrier REGISTER refresh and its Expires-0 un-REGISTER reuse the generation of the live binding (a `Contact: *` REGISTER is sent to every generation the node has live bindings on); in-dialog requests, ACKs, CANCELs and proxy-originated BYEs follow the dialog route recorded at INVITE time (`dialogRoute`), so they never migrate; carrier→switch traffic on a retained address (including calls to a registered `fsbc` Contact) keeps admitting and routing until the call or registration ends. All pin state is in-memory, like the directory itself.
 
 ### 6.5 Outbound path: switch to carrier
 
@@ -4315,10 +4332,20 @@ the binding; a carrier call that arrives first carries an unknown token and is
 delivered by DID (§6).
 
 **Carrier DNS outage.** A failed refresh keeps the last good addresses, so a
-resolver outage never turns a carrier's source address into `unknown`. A DNS
-failure at startup is not fatal: the carrier has no address until a lookup
-succeeds, its source is not recognised and its calls are dropped by admission,
-and a request for it from the switch is answered 503.
+resolver outage never turns a carrier's source address into `unknown`: the
+current generation stays current. A DNS failure at startup is not fatal: the
+carrier has no address until a lookup succeeds, its source is not recognised
+and its calls are dropped by admission, and a request for it from the switch
+is answered 503.
+
+**Carrier gateway handoff (DNS change).** A new generation becomes current
+while pinned traffic stays on the old one (§6.4.1): new requests take the new
+address set, existing calls, registrations and their tcp/tls connections stay
+on the old gateway until they end, then the old generation retires, its
+exclusive connections close and the old addresses stop being carrier sources.
+A failed dial to the new gateway answers the new request 503 without moving
+new traffic back or touching the retained generation; line failover remains
+the switch's responsibility.
 
 **Cooldown recovery.** A switch node recovers on **any** final response;
 otherwise a cooldown simply expires. Because cooldown is skip-if-alternatives,

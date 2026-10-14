@@ -270,6 +270,12 @@ type dialog struct {
 	// (edge.carriers name, or "unknown"); empty for every other call. Set
 	// once right after the record is created (setCarrier).
 	carrier string
+	// carrierGen is the address generation the call was placed or
+	// admitted against: in-dialog traffic and the proxy's own BYEs stay on
+	// its carrier, transport and target address for the life of the call
+	// and never migrate. It holds a refDialog, released once when the
+	// record ends. Nil for non-carrier calls and "unknown" sources.
+	carrierGen *carrierGen
 	// srtp is the SDES policy of the call's public leg (sdes.go).
 	srtp srtpPolicy
 
@@ -382,6 +388,9 @@ type dialogTable struct {
 	// rather than by signaling. Both endpoints still believe the call is
 	// up, so the server tells them. Set once, before any call exists.
 	onMediaEnd func(d *dialog, why endReason)
+	// releaseGen is called once, by the winning end(), to release the
+	// carrier address generation a dialog pinned. Set once in New.
+	releaseGen func(g *carrierGen)
 
 	metrics *Metrics
 	log     *slog.Logger
@@ -747,6 +756,14 @@ func (d *dialog) carrierName() string {
 	d.tab.mu.Lock()
 	defer d.tab.mu.Unlock()
 	return d.carrier
+}
+
+// setCarrierGen records the carrier address generation the call is pinned
+// to. The reference itself is taken by the caller; end() releases it.
+func (d *dialog) setCarrierGen(g *carrierGen) {
+	d.tab.mu.Lock()
+	d.carrierGen = g
+	d.tab.mu.Unlock()
 }
 
 // tags returns the dialog's caller and callee tags. The callee tag is
@@ -1241,6 +1258,7 @@ func (d *dialog) endBy(reason endReason, by terminator) bool {
 	}
 	wasUp := d.state == dialogConfirmed
 	confirmedAt, carrier := d.confirmedAt, d.carrier != ""
+	pinnedGen := d.carrierGen
 	d.state = dialogEnded
 	d.inFlight = nil
 	if d.owed != nil && d.owed.timer != nil {
@@ -1257,6 +1275,13 @@ func (d *dialog) endBy(reason endReason, by terminator) bool {
 	t.sessions--
 	t.metrics.SetSessions(t.sessions)
 	t.mu.Unlock()
+
+	// Release the call's generation pin exactly once: from now on no
+	// in-dialog traffic will name the old address set on this call's
+	// behalf, so a generation whose last pin this was may retire.
+	if pinnedGen != nil && t.releaseGen != nil {
+		t.releaseGen(pinnedGen)
+	}
 
 	if sess == nil {
 		return wasUp

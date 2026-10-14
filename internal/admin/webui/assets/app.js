@@ -1019,12 +1019,45 @@
         why.title = c.last_error;
         status.appendChild(why);
       }
+      var ledger = genSummary(c);
+      if (ledger.text) {
+        var gens = el("div", "muted mono", ledger.text);
+        gens.title = ledger.title;
+        status.appendChild(gens);
+      }
       var expires = timeCell(c.expires_at);
       var resolved = timeCell(c.resolved_at);
       if (c.cache_age_seconds != null) resolved.title = (resolved.title ? resolved.title + " · " : "") + "age " + fmtDuration(c.cache_age_seconds);
       return [monoCell(c.name), monoCell(c.host), monoCell(c.transport), monoCell(c.mode),
         addressesCell(c.addresses), resolved, expires, status];
     });
+  }
+
+  // genSummary renders the address-generation ledger: the current id and
+  // every retained generation with what still pins it. The title carries
+  // the full ledger including retired generations and handoffs.
+  function genSummary(c) {
+    var lines = [];
+    var retained = [];
+    (c.generations || []).forEach(function (g) {
+      var pins = [];
+      if (g.refs.connections) pins.push(g.refs.connections + " conn");
+      if (g.refs.registrations) pins.push(g.refs.registrations + " reg");
+      if (g.refs.dialogs) pins.push(g.refs.dialogs + " call");
+      if (g.refs.transactions) pins.push(g.refs.transactions + " tx");
+      var line = "gen " + g.id + " " + g.state + (pins.length ? " · " + pins.join(", ") : "");
+      lines.push(line);
+      if (g.state === "retained") {
+        retained.push("gen " + g.id + " retained" + (pins.length ? " · " + pins.join(", ") : ""));
+      }
+      (g.handoffs || []).forEach(function (h) {
+        var other = h.generation ? " \u2192 gen " + h.generation : "";
+        lines.push("  " + (h.at ? h.at + " " : "") + h.kind + other + (h.detail ? " (" + h.detail + ")" : ""));
+      });
+    });
+    var text = c.generation_id ? "gen " + c.generation_id : "";
+    if (retained.length) text = (text ? text + " \u00b7 " : "") + retained.join(" \u00b7 ");
+    return { text: text, title: lines.join("\n") };
   }
 
   function regURL() {

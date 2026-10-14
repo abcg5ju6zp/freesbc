@@ -320,6 +320,11 @@ func (s *Server) inviteToUpstream(req *sip.Request, tx sip.ServerTransaction, sr
 		return
 	}
 	defer d.endUnlessUp()
+	// The call depends on the public flow the INVITE arrived on (0 for
+	// UDP): if that stream connection closes before the call establishes,
+	// retireFlow ends this record instead of leaving an attempt aimed at a
+	// closed socket.
+	d.setFlow(s.flowOf(from.transport, src))
 	if carrier != "" {
 		d.setCarrier(carrier)
 	}
@@ -605,6 +610,10 @@ func (s *Server) inviteToClient(req *sip.Request, tx sip.ServerTransaction) {
 		return
 	}
 	defer d.endUnlessUp()
+	// The call is deliverable only over the registered binding's flow:
+	// that connection closing while the INVITE is still ringing ends the
+	// attempt rather than retransmitting into a closed socket.
+	d.setFlow(binding.FlowID)
 	d.setSRTP(s.legSRTPPolicy("", binding.Transport))
 
 	// An offerless INVITE is forwarded as it is: the offer is the

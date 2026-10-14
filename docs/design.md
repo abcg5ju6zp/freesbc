@@ -436,19 +436,30 @@ SIGINT/SIGTERM gets Go's default action and ends the process even when the
 graceful shutdown hangs (audit P2-APP-008). There is no single deadline at
 the app level; each component bounds its own steps as below.
 
-**Edge** (`edge.go:758-761`): `s.dialogs.close()` → `listenCancel()` → each
-listener's closer closes its socket → `wg.Wait()` (which also waits for the
-prune ticker and the carrier directory goroutine) → `s.dialogs.closeAll()`,
-which ends every dialog and therefore closes every media session. Closing the
-dialog table first is what keeps an INVITE handler that is still in flight
-(sipgo runs handlers on their own goroutines, which `Run` does not wait for)
-from allocating media after shutdown began or leaking it (audit P2-EDG-027):
-`begin` refuses a new dialog (the INVITE is answered 503), the allocation
-paths check `dialog.open()` first, and `attach` closes a session it can no
-longer hand to a live dialog. There is no BYE-on-shutdown on this plane;
-calls are dropped, and the phones and the switch find out from their own
-session timers or media timeouts. `defer sh.Close()` on the shield (and the
-sipgo client and user agent) fires after all of this.
+**Edge** (`edge.go` Run shutdown): `s.dialogs.close()` → `listenCancel()` →
+each listener's closer closes its socket → `wg.Wait()` (which also waits for
+the prune ticker and the carrier directory goroutine) →
+`waitListenersSettled` waits for the accept loops to exit and every accepted
+connection to finish preparing, and for in-flight carrier dials (bounded by
+the 10 s handshake deadline), so the sweep cannot race a connection still
+being wrapped or admitted → `s.reaper.closeOpenFlows()` runs the bounded,
+ordered teardown of every still-open stream flow (retire its bindings, end
+their subscriptions and the early dialogs on it, close the socket, release
+the slot — local work only, no network wait) → `s.dialogs.closeAll()`, which
+ends every dialog and therefore closes every media session →
+`s.subs.closeAll()` → `reportShutdownResidual()` logs what remains (stream
+bindings, subscriptions, dialogs and open connections should all be zero and
+otherwise produce a WARN; UDP bindings are expected residue and age out on
+their registrar-granted expiry). Closing the dialog table first is what keeps an
+INVITE handler that is still in flight (sipgo runs handlers on their own
+goroutines, which `Run` does not wait for) from allocating media after
+shutdown began or leaking it (audit P2-EDG-027): `begin` refuses a new
+dialog (the INVITE is answered 503), the allocation paths check
+`dialog.open()` first, and `attach` closes a session it can no longer hand
+to a live dialog. There is no BYE-on-shutdown on this plane; calls are
+dropped, and the phones and the switch find out from their own session
+timers or media timeouts. `defer sh.Close()` on the shield (and the sipgo
+client and user agent) fires after all of this.
 
 **Admin**: on `ctx.Done()`, `srv.Shutdown` under a fresh **5 s** timeout
 (`admin/server.go:313-315`). In-flight HTTP requests are drained up to that
@@ -976,12 +987,34 @@ own listener (`streamListener`) and bounds every stream transport the same way.
   `streamWriteTimeout` (10 s) deadline, so a client that
   stops reading cannot pin a transaction goroutine. A policy close returns
   `io.EOF` to sipgo, which logs it at Debug.
-- **Close.** `streamConn.Close` runs once: it frees the connection's slot and
-  calls `Location.RemoveBySourceOn(transport, remote)`, which drops the
-  bindings made over it, and not a UDP binding with the same IP:port (and their subscriptions, through the `Location` removal hook). A
-  REGISTER over a new connection from the same device (same AoR and Call-ID)
-  re-indexes the existing binding under the new source, so the old
-  connection closing afterwards removes nothing.
+- **Close and flow generations.** Each accepted or dialed stream connection
+  is issued a process-unique **flow ID** at admission (`flowRegistry`,
+  `internal/edge/flow.go`); a REGISTER stamps its binding with the flow it
+  arrived on (`Binding.FlowID`, 0 for UDP). `streamConn.Close` runs once and
+  retires exactly that generation through the ordered `flowReaper`:
+  1. `Location.RetireFlow(id)` removes the bindings the flow owns, so no new
+     admission (`HasSource`) or delivery (`ByToken`) can pick the dying
+     transport;
+  2. their SUBSCRIBE records end (the `Location` removal hook, confirmed
+     explicitly as phase 2) and the still-unestablished dialogs routed over
+     the flow end (`dialogTable.retireFlow`, reason `flow_gone`) with their
+     media and session slots, their in-flight INVITEs CANCELled or stopped;
+  3. the socket closes, the connection slot is released and the metrics
+     views drop it.
+  Retirement is keyed by the flow ID, never by the remote address: a client
+  that reconnects before the old socket finishes closing can reuse the same
+  transport and IP:port, and the old connection's delayed teardown cannot
+  remove the new generation's binding. Each step records its per-item
+  result, so a repeated close callback, a partial failure or an expiry scan
+  interleaving with the teardown only retries unconfirmed items. A REGISTER
+  refresh over a new connection (same AoR and Call-ID) keeps its token,
+  bumps the binding version (`Binding.gen`) and re-indexes onto the new
+  flow; a registrar response observed an earlier version is ignored
+  (`Location.Commit`, `ErrStaleBinding`), so a delayed answer can neither
+  move the binding back onto a closed socket nor delete a replacement. At
+  shutdown the reaper runs the same bounded teardown for every open flow and
+  the residual state (stream bindings/subs/dialogs/connections, and the UDP
+  bindings left to expire) is logged.
 - **Keep-alive.** sipgo answers a double CRLF with a single CRLF on tcp and tls
   (`transport_tcp.go`, after the read filter) and ignores a single CRLF. The
   framer sees these as keep-alives, not messages, and a CRLF-only read is
@@ -1189,45 +1222,64 @@ Contact — the one carrying its `fsbc` token, since the 200 lists every
 binding of the AoR (§10.3 step 8) and another device's lifetime must not be
 taken for this one — then the response's `Expires` header, then the
 requested value. Values are delta-seconds as above, so the result is never
-negative. `granted <= 0` or an un-REGISTER removes the binding; a wildcard
-un-REGISTER removes **every** binding of the AoR.
+negative. `granted <= 0` or an un-REGISTER retires the binding **version the
+request observed** (`Location.RetireObserved`); a wildcard un-REGISTER
+retires exactly the `(token, gen)` set snapshotted when the request went out
+(`Location.RetireAOR`), so a device that registered in between keeps its
+binding.
+
+Every binding carries two identities: the **token** (stable for the life of
+the (AoR, Call-ID) registration) and the **generation** (`Binding.gen`,
+starting at 1 and bumped on every accepted refresh); a stream binding also
+carries the **flow ID** of the connection it was accepted on. Before
+forwarding, the REGISTER path records the token and generation it observes
+(`ObservedBinding`/`ObservedAOR`) and the current flow (`Server.flowOf`);
+the response path (`recordBinding`) installs with `Location.Commit(b,
+observedGen)`, which only writes while that generation is still current and
+the flow still open — a delayed 200 from a replaced registration or a closed
+connection returns `ErrStaleBinding` and changes nothing.
 
 `Location` holds `byToken` and `byAOR` under one `RWMutex`, with
 **compile-time** caps: `defaultMaxBindings = 20000` total and
-`defaultMaxPerAOR = 10`. `Put` prunes **only that AoR** (a REGISTER is the
-hottest path, and sweeping the whole table would make one registration's cost
-grow with the table), refreshes in place when (AoR, Call-ID) already exists —
-reusing the token — and otherwise enforces the two caps, returning
-`ErrTooManyBindings`. Expired bindings are invisible to `ByToken`/`ByAOR`
+`defaultMaxPerAOR = 10`. `Commit` prunes **only that AoR** (a REGISTER is
+the hottest path, and sweeping the whole table would make one registration's
+cost grow with the table), refreshes in place when (AoR, Call-ID) already
+exists — reusing the token and bumping the gen — and otherwise enforces the
+two caps, returning `ErrTooManyBindings`. `Put` is the unconditional
+test/back-door variant. Expired bindings are invisible to `ByToken`/`ByAOR`
 before any prune runs; the 30-second `Prune` ticker only reclaims memory.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Active: recordBinding -> Location.Put (2xx with granted > 0)
-    Active --> Active: refresh (same AoR+Call-ID) keeps Token, updates Source/ExpiresAt
-    Active --> Removed: un-REGISTER or granted <= 0 -> Location.Remove
-    Active --> Removed: Contact * un-REGISTER -> Location.Remove for every binding of the AoR
-    Active --> Removed: WebSocket close -> Location.RemoveBySource
+    [*] --> Active: recordBinding -> Location.Commit (2xx with granted > 0, observed gen current, flow alive)
+    Active --> Active: refresh (same AoR+Call-ID) keeps Token, bumps gen, re-indexes onto Source/Flow
+    Active --> Removed: un-REGISTER or granted <= 0 -> RetireObserved(token, gen)
+    Active --> Removed: Contact * un-REGISTER -> RetireAOR(observed (token, gen) set)
+    Active --> Removed: stream connection close -> flowReaper -> RetireFlow(flow ID)
     Active --> Expired: ExpiresAt passed (invisible to lookups)
     Expired --> Removed: Location.Prune / pruneAORLocked
     Removed --> [*]
 ```
 
-Transitions: `recordBinding` (`internal/edge/register.go:305-342`) performs the insert and
-the removals; `Location.Put` (`location.go:119-161`) is the refresh-in-place
-path; `Binding.Expired` (`location.go:49`) is the predicate that hides an
-expired entry from `ByToken`/`ByAOR`; `Location.Prune` (`location.go:374`)
-and `pruneAORLocked` delete expired entries; `RemoveBySource`
-(`location.go:182`) is called from the WebSocket close hook.
+Transitions: `recordBinding` (`internal/edge/register.go`) performs the
+insert and the retirements; `Location.Commit` is the generation-checked
+refresh/insert path and `Put` its unconditional counterpart;
+`Binding.Expired` is the predicate that hides an expired entry from
+`ByToken`/`ByAOR`; `Location.Prune` and `pruneAORLocked` delete expired
+entries; `RetireFlow` (`internal/edge/location.go`) is called from the flow
+reaper (§7.1a), never from an address lookup.
 
-`Location` keeps three indexes over one set of bindings: `byToken`, `byAOR`
-and `bySource` (keyed by `Binding.Source`). Every insertion goes through
-`Put` and every removal through `deleteLocked`, which maintain all three; a
-refresh from a new source re-indexes the binding under it. `bySource` serves
-`RemoveBySource` (no full scan) and `HasSource(transport, src)`
-(`location.go:219`), the INVITE admission lookup (§7.5), which ignores
-expired bindings exactly as `ByToken` does. There is no eviction: a full
-table refuses a new binding (`ErrTooManyBindings`).
+`Location` keeps four indexes over one set of bindings: `byToken`, `byAOR`,
+`bySource` (keyed by `Binding.Source`) and `byFlow` (keyed by
+`Binding.FlowID`; UDP bindings, flow 0, are absent). Every insertion goes
+through `Commit`/`Put` and every removal through `deleteLocked`, which
+maintain all four; a refresh from a new source or flow re-indexes the
+binding under both. `bySource` serves `HasSource(transport, src)`, the
+INVITE admission lookup (§7.5), which ignores expired bindings exactly as
+`ByToken` does; `byFlow` serves `RetireFlow` (no full scan) and is what lets
+a connection close retire its own generation while sparing a newer
+connection at the same address. There is no eviction: a full table refuses a
+new binding (`ErrTooManyBindings`).
 
 `Binding.Source` is the **transport source of the REGISTER**, never the
 Contact host: the far side of the client's NAT pinhole for UDP, and the
@@ -1235,11 +1287,12 @@ pooled connection key for TCP/TLS/WS/WSS. A browser's own Contact typically
 names a `.invalid` host, which is exactly why it is replaced; a TCP or TLS
 phone's Contact is likewise never dialed.
 
-On the close of a stream connection, `streamConn.Close` calls
-`Location.RemoveBySource(ap)` and updates the registration gauge: a stream
-registration is reachable only through its own connection (RFC 5626 flow
-semantics), so keeping the binding would make FreeSBC accept calls it cannot
-deliver.
+On the close of a stream connection, `streamConn.Close` runs the ordered
+`flowReaper` teardown for the connection's own flow ID and updates the
+registration gauge (§7.1a): a stream registration is reachable only through
+its own connection (RFC 5626 flow semantics), so keeping the binding would
+make FreeSBC accept calls it cannot deliver; UDP has no flow and ages out on
+its registrar-granted expiry instead.
 
 ### 7.5 INVITE classification
 
@@ -1940,13 +1993,15 @@ NOTIFY still routes. A 2xx to a refresh resets the deadline. A NOTIFY answered
 2xx follows its `Subscription-State`: `terminated` ends the record,
 `expires=` moves the deadline. The record ends on a **481** to either request,
 on any non-2xx final to the initial SUBSCRIBE, on `prune` (the 30 s ticker,
-`edge.go:707`), on `closeAll` at shutdown (`edge.go:662`, `edge.go:762`), and when its
-registration binding is removed: `Location` collects the tokens of every
-binding it deletes (un-REGISTER, `RemoveBySource` for a closed WS/WSS
-connection, expiry in `Prune`, the per-AoR sweep in `Put`) and hands them to
-`subTable.dropTokens` through `SetOnRemove` (`location.go:317`) **after** it
-releases its own lock, so `Location.mu` is never held when `subTable.mu` is
-taken (§11.2).
+`edge.go`), on `closeAll` at shutdown, and when its registration binding is
+removed: `Location` collects the tokens of every binding it deletes
+(un-REGISTER via `RetireObserved`, a wildcard via `RetireAOR`,
+`RetireFlow` for a closed tcp/tls/ws/wss connection, expiry in `Prune`, the
+per-AoR sweep in `Commit`/`Put`) and hands them to `subTable.dropTokens`
+through `SetOnRemove` **after** it releases its own lock, so `Location.mu`
+is never held when `subTable.mu` is taken (§11.2). The flow reaper repeats
+the same drop as phase 2 of a connection close, which is a confirmed no-op
+when the hook already ran.
 
 **Bounds.** `begin` (`subscribe.go:129`) enforces both caps atomically with
 the insert: `maxSubsPerBinding` (32) records per registration binding and
@@ -2956,7 +3011,7 @@ sequenceDiagram
     P->>G: REGISTER + Authorization
     G->>FS: REGISTER + Authorization (verbatim, R-URI still unchanged)
     FS-->>G: 200 OK (Contact with expires=120, Expires header 120)
-    Note over G: recordBinding, granted = 120 from the RESPONSE (the Contact carrying this token), then Location.Put
+    Note over G: recordBinding, granted = 120 from the RESPONSE (the Contact carrying this token), then Location.Commit against the gen observed before forwarding
     G-->>P: 200 OK (client's own Contact restored, expires=120)
 ```
 
@@ -2980,10 +3035,10 @@ sequenceDiagram
     G->>FS: REGISTER (Contact sip:user@private.ip:5060 with transport=udp and fsbc=TOKEN)
     FS-->>G: 401 / then 200 OK with a granted expiry
     G-->>B: 200 OK (the .invalid Contact restored, expires=granted)
-    Note over G: Binding.Source = the WebSocket's remote addr and port, Binding.Transport = "wss"
+    Note over G: Binding.Source = the WebSocket's remote addr and port, Binding.Transport = "wss", Binding.FlowID = the connection's flow
     B--xL: WebSocket closes
-    L->>G: streamConn.Close -> Location.RemoveBySource(addr:port)
-    Note over G: metrics.SetRegistrations(loc.Count())
+    L->>G: streamConn.Close -> flowReaper: RetireFlow(flowID) (bindings), dropTokens + dialogs.retireFlow, then close socket and release slot
+    Note over G: metrics.SetRegistrations(loc.Count()); a newer connection at the same addr:port keeps its own flow's binding
 ```
 
 `side.laddr` is zero for tcp/tls/ws/wss, so outbound requests toward this client ride
@@ -3219,7 +3274,9 @@ If the forward fails, FreeSBC makes one stateless re-send attempt and answers
 
 | Lock | Guards |
 |---|---|
-| `edge.Location.mu` (RWMutex) | `byToken`, `byAOR`, `bySource`, and every binding they point to |
+| `edge.Location.mu` (RWMutex) | `byToken`, `byAOR`, `bySource`, `byFlow`, and every binding they point to |
+| `edge.flowRegistry.mu` | the `next` flow ID, the `current` (transport, source) → flow map and the open-flow records |
+| `edge.flowReaper.mu` / `flowRetirement.mu` | the active retirement records and, per flow, the confirmed per-item results (bindings removed, subscriptions converged, early dialogs ended, slot released) |
 | `edge.carrierRegTable.mu` | `byToken`, the carrier registrations |
 | `edge.carrierDirectory.mu` | the resolver cache and its `rand.Rand`, serialising refreshes |
 | `edge.dialogTable.mu` | `byCallID`, `sessions` (the session-slot count behind `shield.max_sessions`) **and every mutable field of every dialog** |

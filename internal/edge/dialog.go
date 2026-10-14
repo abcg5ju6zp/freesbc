@@ -73,6 +73,10 @@ const (
 	// still owed (terminated by the callee), or FreeSBC's own backstop
 	// fired (terminated by the proxy).
 	endAckTimeout
+	// endFlowGone: an unestablished dialog whose client stream connection
+	// closed before it connected. It never confirms, so nothing is counted
+	// as a call ended; the reason exists only for the record.
+	endFlowGone
 	numEndReasons
 )
 
@@ -89,6 +93,7 @@ var endReasonLabels = [numEndReasons]string{
 	endMediaFault:      "media_fault",
 	endShutdown:        "shutdown",
 	endAckTimeout:      "ack_timeout",
+	endFlowGone:        "flow_gone",
 }
 
 // terminator is who ended a call, for the "terminated_by" log field: the
@@ -261,6 +266,13 @@ type dialog struct {
 	// A request whose tags say "from the caller" but which arrived on the
 	// other plane is not this dialog's.
 	callerPlane plane
+	// flowID is the public stream connection this still-unestablished
+	// dialog depends on (the caller's for a public INVITE, the callee
+	// binding's for one from the switch); zero for UDP. While the dialog
+	// is early, that flow's retirement ends it: a call to a socket that
+	// just closed can never connect. A confirmed dialog keeps its own
+	// BYE/watchdog lifecycle and is not retired by a flow.
+	flowID flowID
 
 	state    dialogState
 	inFlight *inviteAttempt
@@ -569,6 +581,62 @@ func (t *dialogTable) usesRemote(transport, remote string) bool {
 		}
 	}
 	return false
+}
+
+// setFlow records the public stream flow an early dialog depends on. It is
+// set once, right after begin: the caller's flow for a public INVITE, the
+// resolved binding's for one from the switch.
+func (d *dialog) setFlow(id flowID) {
+	d.tab.mu.Lock()
+	d.flowID = id
+	d.tab.mu.Unlock()
+}
+
+// retireFlow converges the UNESTABLISHED dialogs that depended on a stream
+// connection that has closed: every still-early dialog tagged with the flow
+// is ended (its media and session slot released with it) and the in-flight
+// INVITE attempts are handed back so the caller can quiet them. Confirmed
+// dialogs are deliberately left alone — an established call ends on BYE or
+// the media watchdog, as on any other connection loss.
+//
+// Like end(), it is safe to race with confirm, CANCEL and shutdown: only
+// the dialogs still early AND still owned by the flow are taken.
+func (t *dialogTable) retireFlow(id flowID) []*inviteAttempt {
+	if id == 0 {
+		return nil
+	}
+	t.mu.Lock()
+	var early []*dialog
+	for _, ds := range t.byCallID {
+		for _, d := range ds {
+			if d.state == dialogEarly && d.flowID == id {
+				early = append(early, d)
+			}
+		}
+	}
+	t.mu.Unlock()
+
+	var attempts []*inviteAttempt
+	for _, d := range early {
+		// Re-check under the lock: a 2xx may have confirmed it between
+		// the scan and here. Such a dialog is established and is not
+		// retired, however inconvenient the lost socket is.
+		d.tab.mu.Lock()
+		owned := d.state == dialogEarly && d.flowID == id
+		d.tab.mu.Unlock()
+		if !owned {
+			continue
+		}
+		// Quiet the in-flight INVITE. cancelSeries marks the series
+		// cancelled (no late answer can confirm) and hands over the
+		// tracked attempt, whose context the caller stops or whose CANCEL
+		// it sends.
+		if a, _ := d.cancelSeries(cancelOrphan); a != nil {
+			attempts = append(attempts, a)
+		}
+		d.end(endFlowGone)
+	}
+	return attempts
 }
 
 // count is the number of calls that are up — the same number the dialog

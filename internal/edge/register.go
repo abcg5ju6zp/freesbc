@@ -2,6 +2,7 @@ package edge
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"strconv"
 	"time"
@@ -93,17 +94,32 @@ func (s *Server) onRegister(req *sip.Request, tx sip.ServerTransaction, arrived 
 	// The token must be stable across a registration's whole lifetime:
 	// FreeSWITCH stores the Contact we send now and uses it as the
 	// Request-URI of every future inbound call, so a refresh that changed
-	// the token would strand the earlier one. Location.Put reuses the
+	// the token would strand the earlier one. Location.Commit reuses the
 	// token of an existing (AoR, Call-ID) binding for exactly this reason;
 	// here we look it up first so the REGISTER we forward already carries
-	// it.
-	token := s.existingToken(aor, fsip.CallID(req))
-	if token == "" {
+	// it. The binding VERSION observed at the same moment travels with the
+	// attempt: a response is allowed to retire or replace only what it
+	// saw, so a registration superseded while in flight (a reconnect on a
+	// new flow, a parallel un-REGISTER) is not damaged by a delayed answer.
+	obs, hadObserved := s.loc.ObservedBinding(aor, fsip.CallID(req))
+	token := obs.Token
+	if !hadObserved {
 		token = fsip.NewToken()
+	}
+	// The set a wildcard un-REGISTER ("Contact: *") observed is snapshotted
+	// now; only those versions are retired when its 200 returns.
+	var observed []bindingObs
+	if wildcard {
+		observed = s.loc.ObservedAOR(aor)
 	}
 	in := bindingInput{
 		token: token, aor: aor, user: user, callID: fsip.CallID(req),
+		gen: obs.Gen, observed: observed,
 		transport: from.transport, source: src,
+		// The flow the REGISTER arrived on, fixed now. It is zero for UDP
+		// and the current owner of (transport, source) for a stream: a
+		// response that lands after that flow retired cannot install.
+		flow:      s.flowOf(from.transport, src),
 		requested: expires, unregister: unregister,
 		clientContact: clientContact, hasContact: hasContact,
 		wildcard: wildcard,
@@ -341,8 +357,15 @@ func (s *Server) logRegister(res *sip.Response, aor, transport string, src netip
 type bindingInput struct {
 	token, aor, user, callID, transport string
 	source                              netip.AddrPort
-	requested                           time.Duration
-	unregister                          bool
+	// gen is the binding version observed before forwarding (0 when none
+	// was live); observed is the set a wildcard un-REGISTER saw. The
+	// response path may retire or replace only those versions.
+	gen      uint64
+	observed []bindingObs
+	// flow is the stream connection the REGISTER arrived on (0 for UDP).
+	flow       flowID
+	requested  time.Duration
+	unregister bool
 	// clientContact/hasContact are the client's own Contact as received,
 	// carried so pumpRegister can put it back in the 200 OK.
 	clientContact sip.Uri
@@ -364,12 +387,13 @@ type bindingInput struct {
 //
 // The registrar's 200 lists every binding of the AoR, so the expiry read is
 // the one on the Contact carrying this binding's token, not whichever
-// Contact comes first. A wildcard un-REGISTER removes every binding of the
-// AoR, from every device, as it did upstream.
+// Contact comes first. A wildcard un-REGISTER removes every binding version
+// it observed of the AoR, from every device, as it did upstream — but not a
+// device that registered after the request went out.
 func (s *Server) recordBinding(res *sip.Response, in bindingInput) int {
 	if in.wildcard {
-		for _, b := range s.loc.ByAOR(in.aor) {
-			s.loc.Remove(in.aor, b.CallID)
+		if n := len(s.loc.RetireAOR(in.aor, in.observed)); n > 0 {
+			s.log.Debug("wildcard un-REGISTER retired observed bindings", "aor", in.aor, "count", n)
 		}
 		s.metrics.SetRegistrations(s.loc.Count())
 		return 0
@@ -379,7 +403,13 @@ func (s *Server) recordBinding(res *sip.Response, in bindingInput) int {
 		return ok && t == in.token
 	})
 	if in.unregister || granted <= 0 {
-		s.loc.Remove(in.aor, in.callID)
+		if s.loc.RetireObserved(in.aor, in.callID, in.gen) == nil && in.gen != 0 {
+			// The 200 is stale to a binding that replaced the one this
+			// un-REGISTER observed: the newer registration is the current
+			// registrar judgement and stays.
+			s.log.Debug("un-REGISTER response stale to a newer registration; keeping the binding",
+				"aor", in.aor, "transport", in.transport)
+		}
 		s.metrics.SetRegistrations(s.loc.Count())
 		return 0
 	}
@@ -388,9 +418,30 @@ func (s *Server) recordBinding(res *sip.Response, in bindingInput) int {
 		Transport: in.transport,
 		CallID:    in.callID,
 		Source:    in.source,
+		FlowID:    in.flow,
 		ExpiresAt: time.Now().Add(granted),
 	}
-	if _, err := s.loc.Put(b); err != nil {
+	if streamIndex(in.transport) >= 0 && in.flow == 0 {
+		// The REGISTER was in flight when its connection retired, so its
+		// success cannot own a flow: installing it would admit calls the
+		// edge could never deliver. The client reconnects and registers
+		// again.
+		s.log.Debug("ignoring REGISTER response whose stream connection retired in flight",
+			"aor", in.aor, "transport", in.transport)
+		s.metrics.SetRegistrations(s.loc.Count())
+		return int(granted / time.Second)
+	}
+	if _, err := s.loc.Commit(b, in.gen); err != nil {
+		if errors.Is(err, ErrStaleBinding) {
+			// A replacement registration won while this response was in
+			// flight, or its connection closed meanwhile: its binding is
+			// the state to keep. Do not move anything back onto the old
+			// source or resurrect a retired flow.
+			s.log.Debug("ignoring stale REGISTER response for a superseded binding",
+				"aor", in.aor, "transport", in.transport)
+			s.metrics.SetRegistrations(s.loc.Count())
+			return int(granted / time.Second)
+		}
 		// The table is full. The registration itself succeeded upstream,
 		// so the client is registered — FreeSBC just cannot deliver
 		// inbound calls to it. Say so loudly rather than failing silently.
@@ -403,15 +454,14 @@ func (s *Server) recordBinding(res *sip.Response, in bindingInput) int {
 	return int(granted / time.Second)
 }
 
-// existingToken returns the token already registered for this (AoR,
-// Call-ID) pair, or "" if this is a new registration.
-func (s *Server) existingToken(aor, callID string) string {
-	for _, b := range s.loc.ByAOR(aor) {
-		if b.CallID == callID {
-			return b.Token
-		}
+// flowOf is the stream flow a REGISTER arriving over transport from src
+// belongs to. UDP has no flow and yields 0: its bindings are retired by
+// expiry alone, never by a connection.
+func (s *Server) flowOf(transport string, src netip.AddrPort) flowID {
+	if streamIndex(transport) < 0 {
+		return 0
 	}
-	return ""
+	return s.flows.currentID(transport, src)
 }
 
 // registeredContact is the Contact FreeSBC registers upstream on a

@@ -245,6 +245,15 @@ type streamListener struct {
 	ready     chan net.Conn
 	done      chan struct{}
 	closeOnce sync.Once
+
+	// accepts is done when the accept loop has exited, so no further
+	// prepare goroutine can be spawned. prepares is done when every spawned
+	// prepare has finished (including its handshake): shutdown waits both
+	// before sweeping flows, so it cannot close or sweep a connection
+	// another goroutine is still wrapping or admitting — bounded by the
+	// handshake/read deadlines.
+	accepts  sync.WaitGroup
+	prepares sync.WaitGroup
 }
 
 func (s *Server) newStreamListener(ln net.Listener, transport string, conf *tls.Config) *streamListener {
@@ -252,12 +261,21 @@ func (s *Server) newStreamListener(ln net.Listener, transport string, conf *tls.
 		Listener: ln, s: s, transport: transport, tlsConf: conf,
 		ready: make(chan net.Conn, 128), done: make(chan struct{}),
 	}
+	l.accepts.Add(1)
 	go l.acceptLoop()
 	return l
 }
 
+// waitSettled blocks until the listener has stopped accepting and every
+// in-flight prepare has completed. Called on shutdown before the flow
+// reaper sweeps connections.
+func (l *streamListener) waitSettled() {
+	l.accepts.Wait()
+	l.prepares.Wait()
+}
+
 func (l *streamListener) acceptLoop() {
-	defer l.shut()
+	defer l.accepts.Done()
 	var backoff time.Duration
 	for {
 		c, err := l.Listener.Accept()
@@ -287,7 +305,11 @@ func (l *streamListener) acceptLoop() {
 			}
 		}
 		backoff = 0
-		go l.prepare(c)
+		l.prepares.Add(1)
+		go func() {
+			defer l.prepares.Done()
+			l.prepare(c)
+		}()
 	}
 }
 
@@ -348,6 +370,10 @@ func (l *streamListener) prepare(raw net.Conn) {
 		return
 	}
 	c := &streamConn{Conn: raw, l: l, ap: ap, remote: raw.RemoteAddr().String(), lim: lim, carrier: carrier}
+	// Fix the connection's generation before anything (a refused rate
+	// token, a failed handshake) can close it: its whole teardown is
+	// keyed by this ID.
+	c.flowID = s.flows.issue(l.transport, ap, c, carrier)
 	s.metrics.StreamConnOpened(l.transport)
 	if sh := s.currentShield(); sh != nil && !sh.AllowRate(ip) {
 		// A connection costs the token a datagram does, so a flood of
@@ -394,6 +420,11 @@ type streamConn struct {
 	remote string
 	lim    streamLimits
 	fr     framer
+	// flowID is this connection's fixed identity, assigned at admission.
+	// Every binding accepted over it and every early dialog routed to it
+	// carries the ID; close retires exactly that generation, so a new
+	// connection reusing this address is never taken for this one.
+	flowID flowID
 	// carrier is whether the connection is to or from a carrier, which
 	// decides the connection cap it was counted against.
 	carrier bool
@@ -541,26 +572,35 @@ func (c *streamConn) Write(p []byte) (int, error) {
 	return c.Conn.Write(p)
 }
 
-// Close releases the connection's slot and drops the registration bindings
-// made over it. sipgo's pool may close a connection more than once, and the
-// hook must not run again after the address has been reused.
+// Close retires the connection in the one fixed order a lost flow needs
+// (flow.go documents why it cannot be keyed by address):
 //
-// A stream registration is only reachable through its own connection: there
-// is no address to dial (RFC 5626 flow semantics). Keeping the binding after
-// the connection is gone would make FreeSBC accept inbound calls it cannot
-// deliver and leak a table entry until the registrar-granted expiry.
+//  1. block selection and retire the bindings registered over THIS flow
+//     generation, so no new admission or delivery can pick the dying
+//     transport — a new connection reusing the same address keeps its own
+//     bindings;
+//  2. converge the SUBSCRIBE records charged to those bindings and the
+//     unestablished dialogs routed over the flow;
+//  3. close the socket, release the connection slot and leave the metrics
+//     and management views.
+//
+// Each step records what it confirmed, so a repeated close (sipgo's pool
+// may close a connection more than once), a partial failure or an expiry
+// scan interleaving with it only redoes unconfirmed items. The slot is
+// released once. A stream registration is only reachable through its own
+// connection (RFC 5626 flow semantics), so keeping it after the
+// connection is gone would make FreeSBC accept calls it cannot deliver.
 func (c *streamConn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
-		err = c.Conn.Close()
 		s := c.l.s
-		s.streams.release(c.ap.Addr(), c.carrier)
-		s.metrics.StreamConnClosed(c.l.transport)
-		if n := s.loc.RemoveBySourceOn(c.l.transport, c.ap); n > 0 {
-			s.metrics.SetRegistrations(s.loc.Count())
-			s.log.Debug("stream connection closed; dropped its registration bindings",
-				"transport", c.l.transport, "public_remote", c.remote, "count", n)
-		}
+		// Phases 1 and 2, before the socket and its slot go.
+		s.reaper.converge(c.flowID)
+		// Phase 3: stop the read loop (sipgo drops the pooled connection
+		// on the resulting error) and release this connection's own
+		// resources exactly once.
+		err = c.Conn.Close()
+		s.reaper.finish(c)
 	})
 	return err
 }

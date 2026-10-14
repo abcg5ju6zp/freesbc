@@ -1,6 +1,7 @@
 package edge
 
 import (
+	"errors"
 	fsip "github.com/freesbc/freesbc/internal/sip"
 	"net/netip"
 	"sort"
@@ -43,6 +44,20 @@ type Binding struct {
 	// CallID and CSeq identify the registration flow, so a refresh
 	// replaces the right binding rather than creating a second one.
 	CallID string
+	// FlowID is the stream connection (tcp, tls, ws, wss) this
+	// registration was accepted over, fixed at the successful REGISTER.
+	// Zero means UDP: the binding owns no connection the proxy can close
+	// and is left to its registrar-granted expiry. Cleanup of a closed
+	// connection removes a binding by THIS, never by Source: a new
+	// connection that reused the same transport and IP:port gets its own
+	// flow ID and is invisible to the old connection's retirement.
+	FlowID flowID
+	// gen is the binding version: 1 on first insert, incremented on every
+	// accepted refresh. A registrar response observed an earlier gen
+	// (an un-REGISTER or a granted REGISTER whose answer was delayed) may
+	// only retire or overwrite the binding while that gen is still
+	// current; a replacement registration wins and stays.
+	gen uint64
 }
 
 // Expired reports whether the binding has lapsed as of now.
@@ -62,17 +77,30 @@ type Location struct {
 	byAOR   map[string][]*Binding
 	// bySource indexes bindings by the transport source address the
 	// REGISTER came from (Binding.Source). It is what the INVITE admission
-	// check (HasSource) and the WebSocket close hook (RemoveBySource) look
-	// up, so neither scans the table. One source may hold several bindings
-	// (a phone registering several lines over one socket).
+	// check (HasSource) looks up, so it does not scan the table. One
+	// source may hold several bindings (a phone registering several lines
+	// over one socket); it is deliberately NOT what a connection close
+	// retires by, because a new connection may reuse the same address.
 	bySource map[netip.AddrPort][]*Binding
 	// byIP counts the bindings per source IP (HasIP), so the admission
 	// strike exemption is a map lookup, not a scan.
-	byIP     map[netip.Addr]int
+	byIP map[netip.Addr]int
+	// byFlow indexes bindings by the stream connection that owns them
+	// (Binding.FlowID); it is the ONLY index a connection close retires
+	// by. UDP bindings (flow 0) are not in it. One flow may hold several
+	// bindings (a phone registering several lines over one socket).
+	byFlow   map[flowID][]*Binding
 	maxTotal int
 	// maxPerAOR caps how many devices one user may have registered at
 	// once, so a single compromised account cannot consume the table.
 	maxPerAOR int
+
+	// flowAlive reports whether a stream flow is still open. Commit
+	// consults it before installing a stream binding, so the delayed 2xx
+	// of a REGISTER sent over a connection that has since closed cannot
+	// land a binding aimed at a dead socket. nil (table tests) accepts
+	// every flow.
+	flowAlive func(id flowID) bool
 
 	// onRemove, when set, is told the tokens of bindings that left the
 	// table (SetOnRemove). removed collects them under mu; the mutating
@@ -104,12 +132,22 @@ func NewLocation() *Location {
 		byAOR:     map[string][]*Binding{},
 		bySource:  map[netip.AddrPort][]*Binding{},
 		byIP:      map[netip.Addr]int{},
+		byFlow:    map[flowID][]*Binding{},
 		maxTotal:  defaultMaxBindings,
 		maxPerAOR: defaultMaxPerAOR,
 	}
 }
 
-// Put installs or refreshes a binding. A refresh is recognised by the
+// ErrStaleBinding is returned by Commit when the registrar response does
+// not correspond to the binding version the edge observed when it
+// forwarded the REGISTER: another registration superseded it, its flow has
+// closed, or its binding already left the table. The response is ignored
+// rather than overwriting newer state.
+var ErrStaleBinding = errors.New("proxy: registration response stale to a newer binding")
+
+// Put installs or refreshes a binding UNCONDITIONALLY. It is the test and
+// administrative back door; the REGISTER response path uses Commit, which
+// compares the binding version it observed. A refresh is recognised by the
 // (AoR, Call-ID) pair — the same client re-registering — and reuses the
 // existing token, so the contact FreeSWITCH has stored stays valid across
 // refreshes.
@@ -117,6 +155,28 @@ func NewLocation() *Location {
 // It returns the stored binding, whose Token is the one to advertise
 // upstream.
 func (l *Location) Put(b Binding) (*Binding, error) {
+	return l.commit(b, 0, true)
+}
+
+// Commit installs or refreshes a binding from a successful registrar
+// response, and only while the response is still authoritative:
+//
+//   - observedGen 0 expects no live binding for the (AoR, Call-ID) pair —
+//     a first registration. If one exists, another REGISTER won and the
+//     response is stale.
+//   - observedGen > 0 expects that exact binding version. A replacement
+//     registration (another connection, a re-REGISTER) bumps the gen and a
+//     delayed response then changes nothing: it can neither move the
+//     binding back onto a closed socket nor shorten a newer expiry.
+//
+// A stream binding whose flow is no longer open is refused the same way:
+// a 200 that arrives after its connection closed cannot be delivered to.
+// ErrStaleBinding distinguishes these from ErrTooManyBindings.
+func (l *Location) Commit(b Binding, observedGen uint64) (*Binding, error) {
+	return l.commit(b, observedGen, false)
+}
+
+func (l *Location) commit(b Binding, observedGen uint64, force bool) (*Binding, error) {
 	defer l.flushRemoved()
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -128,18 +188,48 @@ func (l *Location) Put(b Binding) (*Binding, error) {
 	// everyone else's expired bindings is the periodic Prune's job.
 	l.pruneAORLocked(b.AOR, time.Now())
 
+	if !force && b.FlowID != 0 && l.flowAlive != nil && !l.flowAlive(b.FlowID) {
+		// The response's connection is gone; its binding is retired or
+		// about to be, and installing here would aim requests at a socket
+		// nobody holds.
+		return nil, ErrStaleBinding
+	}
+
 	existing := l.byAOR[b.AOR]
 	for _, e := range existing {
-		if e.CallID == b.CallID {
-			// Refresh in place: the token must not change, or FreeSWITCH
-			// would be left holding a contact that no longer resolves.
-			b.Token = e.Token
-			// The refresh may come from a new source (the phone's NAT
-			// mapping changed), so re-index under the new address.
-			l.unindexSourceLocked(e)
-			*e = b
-			l.indexSourceLocked(e)
-			return e, nil
+		if e.CallID != b.CallID {
+			continue
+		}
+		if !force && (observedGen == 0 || e.gen != observedGen) {
+			// A version this response did not observe is installed: the
+			// newer registration's own success or expiry is the fresher
+			// registrar judgement. Leave it and hand it back so the caller
+			// does not count a new registration.
+			return e, ErrStaleBinding
+		}
+		// Refresh in place: the token must not change, or FreeSWITCH
+		// would be left holding a contact that no longer resolves.
+		b.Token = e.Token
+		b.gen = e.gen + 1
+		// The refresh may come from a new source on a new flow (the phone
+		// reconnected), so re-index under both.
+		l.unindexLocked(e)
+		*e = b
+		l.indexLocked(e)
+		return e, nil
+	}
+	// No live binding for the (AoR, Call-ID). A first registration
+	// (observedGen 0) installs with a minted token. A renewal whose
+	// previous binding already expired and was pruned before its fresh
+	// grant arrived is the same registrar judgement with a new lifetime,
+	// so it installs with the token it kept — a refresh that observed
+	// something only ever carries that binding's own token, and the
+	// retired-flow case was rejected above.
+	if !force && b.Token != "" {
+		if _, taken := l.byToken[b.Token]; taken {
+			// The token belongs to another live identity: this response
+			// cannot take it over.
+			return nil, ErrStaleBinding
 		}
 	}
 	if len(existing) >= l.maxPerAOR {
@@ -151,15 +241,54 @@ func (l *Location) Put(b Binding) (*Binding, error) {
 	if b.Token == "" {
 		b.Token = fsip.NewToken()
 	}
+	b.gen = 1
 	nb := &b
 	l.byToken[nb.Token] = nb
 	l.byAOR[nb.AOR] = append(l.byAOR[nb.AOR], nb)
-	l.indexSourceLocked(nb)
+	l.indexLocked(nb)
 	return nb, nil
 }
 
-// Remove drops the binding for an (AoR, Call-ID) pair — an explicit
-// un-REGISTER (Expires: 0). It returns the removed binding, if any.
+// bindingObs identifies one observed binding version: the token the
+// registrar holds and the gen it had when a cleanup decision was made.
+type bindingObs struct {
+	Token string
+	Gen   uint64
+}
+
+// ObservedBinding returns the live (AoR, Call-ID) binding's identity, for
+// a REGISTER to stamp the response path with the version it is allowed to
+// retire or replace.
+func (l *Location) ObservedBinding(aor, callID string) (bindingObs, bool) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	for _, e := range l.byAOR[aor] {
+		if e.CallID == callID && !e.Expired(time.Now()) {
+			return bindingObs{Token: e.Token, Gen: e.gen}, true
+		}
+	}
+	return bindingObs{}, false
+}
+
+// ObservedAOR returns the identity of every live binding of an
+// address-of-record: the set a wildcard ("Contact: *") un-REGISTER may
+// retire when its response returns.
+func (l *Location) ObservedAOR(aor string) []bindingObs {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	now := time.Now()
+	var out []bindingObs
+	for _, e := range l.byAOR[aor] {
+		if !e.Expired(now) {
+			out = append(out, bindingObs{Token: e.Token, Gen: e.gen})
+		}
+	}
+	return out
+}
+
+// Remove drops the binding for an (AoR, Call-ID) pair unconditionally. It
+// is the test/back-door counterpart of Put; response paths use
+// RetireObserved.
 func (l *Location) Remove(aor, callID string) *Binding {
 	defer l.flushRemoved()
 	l.mu.Lock()
@@ -167,49 +296,91 @@ func (l *Location) Remove(aor, callID string) *Binding {
 	list := l.byAOR[aor]
 	for i, e := range list {
 		if e.CallID == callID {
+			b := *list[i]
 			l.deleteLocked(aor, i)
-			return e
+			return &b
 		}
 	}
 	return nil
 }
 
-// RemoveBySource drops every binding registered from a given source
-// address. Called when a WebSocket connection closes: the client is gone
-// and its bindings can no longer be delivered to, so keeping them would
-// leak table entries until their expiry and, worse, make FreeSBC accept
-// inbound calls it cannot deliver.
-func (l *Location) RemoveBySource(src netip.AddrPort) int {
-	return l.removeBySource("", src)
-}
-
-// RemoveBySourceOn is RemoveBySource limited to bindings registered over
-// transport, compared case-insensitively. A stream connection closing must
-// not take a UDP binding that has the same IP:port.
-func (l *Location) RemoveBySourceOn(transport string, src netip.AddrPort) int {
-	return l.removeBySource(transport, src)
-}
-
-func (l *Location) removeBySource(transport string, src netip.AddrPort) int {
+// RetireObserved drops the (AoR, Call-ID) binding only while it is still
+// the version observedGen identified — the explicit un-REGISTER path. A
+// binding replaced (new gen) or already gone after the decision is left
+// untouched, and the method reports nil.
+func (l *Location) RetireObserved(aor, callID string, observedGen uint64) *Binding {
 	defer l.flushRemoved()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	// Copy: deleteLocked edits the index slice being walked.
-	var victims []*Binding
-	for _, b := range l.bySource[src] {
-		if transport == "" || strings.EqualFold(b.Transport, transport) {
-			victims = append(victims, b)
+	if observedGen == 0 {
+		return nil
+	}
+	list := l.byAOR[aor]
+	for i, e := range list {
+		if e.CallID != callID {
+			continue
+		}
+		if e.gen != observedGen {
+			return nil
+		}
+		b := *list[i]
+		l.deleteLocked(aor, i)
+		return &b
+	}
+	return nil
+}
+
+// RetireAOR drops the bindings of an AoR a wildcard un-REGISTER observed,
+// version by version: only the exact (token, gen) pairs leave, so a device
+// that registered between the request and the response keeps its binding.
+// It returns the retired bindings.
+func (l *Location) RetireAOR(aor string, observed []bindingObs) []Binding {
+	defer l.flushRemoved()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	want := make(map[string]uint64, len(observed))
+	for _, o := range observed {
+		want[o.Token] = o.Gen
+	}
+	var out []Binding
+	for _, e := range append([]*Binding(nil), l.byAOR[aor]...) {
+		if gen, ok := want[e.Token]; ok && gen == e.gen {
+			for i, x := range l.byAOR[aor] {
+				if x == e {
+					out = append(out, *x)
+					l.deleteLocked(aor, i)
+					break
+				}
+			}
 		}
 	}
-	for _, b := range victims {
+	return out
+}
+
+// RetireFlow drops every binding owned by flowID — the connection close
+// path — and returns the retired bindings. The flow ID is fixed for a
+// connection's life, so a newer connection that reuses the same transport
+// and source address, and an unconnected UDP binding (flow 0), are never
+// touched. Bindings the expiry scan or an un-REGISTER removed first are
+// simply absent.
+func (l *Location) RetireFlow(id flowID) []Binding {
+	if id == 0 {
+		return nil
+	}
+	defer l.flushRemoved()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []Binding
+	for _, b := range append([]*Binding(nil), l.byFlow[id]...) {
 		for i, e := range l.byAOR[b.AOR] {
 			if e == b {
+				out = append(out, *e)
 				l.deleteLocked(b.AOR, i)
 				break
 			}
 		}
 	}
-	return len(victims)
+	return out
 }
 
 // HasSource reports whether a live (unexpired) binding was registered over
@@ -262,15 +433,19 @@ func (l *Location) SourceBinding(transport string, src netip.AddrPort, user stri
 	return *first, true
 }
 
-// indexSourceLocked adds b to the source index. Caller holds the lock.
-func (l *Location) indexSourceLocked(b *Binding) {
+// indexLocked adds b to the source, IP and flow indexes. Caller holds the
+// lock.
+func (l *Location) indexLocked(b *Binding) {
 	l.bySource[b.Source] = append(l.bySource[b.Source], b)
 	l.byIP[b.Source.Addr().Unmap()]++
+	if b.FlowID != 0 {
+		l.byFlow[b.FlowID] = append(l.byFlow[b.FlowID], b)
+	}
 }
 
-// unindexSourceLocked removes b from the source index. Caller holds the
-// lock.
-func (l *Location) unindexSourceLocked(b *Binding) {
+// unindexLocked removes b from the source, IP and flow indexes. Caller
+// holds the lock.
+func (l *Location) unindexLocked(b *Binding) {
 	ip := b.Source.Addr().Unmap()
 	if l.byIP[ip] <= 1 {
 		delete(l.byIP, ip)
@@ -286,9 +461,23 @@ func (l *Location) unindexSourceLocked(b *Binding) {
 	}
 	if len(list) == 0 {
 		delete(l.bySource, b.Source)
-		return
+	} else {
+		l.bySource[b.Source] = list
 	}
-	l.bySource[b.Source] = list
+	if b.FlowID != 0 {
+		flows := l.byFlow[b.FlowID]
+		for i, e := range flows {
+			if e == b {
+				flows = append(flows[:i], flows[i+1:]...)
+				break
+			}
+		}
+		if len(flows) == 0 {
+			delete(l.byFlow, b.FlowID)
+		} else {
+			l.byFlow[b.FlowID] = flows
+		}
+	}
 }
 
 // deleteLocked removes index i of an AoR's list, and the binding from every
@@ -299,7 +488,7 @@ func (l *Location) deleteLocked(aor string, i int) {
 	if l.onRemove != nil {
 		l.removed = append(l.removed, list[i].Token)
 	}
-	l.unindexSourceLocked(list[i])
+	l.unindexLocked(list[i])
 	list = append(list[:i], list[i+1:]...)
 	if len(list) == 0 {
 		delete(l.byAOR, aor)
@@ -366,6 +555,23 @@ func (l *Location) Count() int {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return len(l.byToken)
+}
+
+// CountByKind splits the live binding count into UDP bindings (flow 0) and
+// stream bindings owned by an open connection. It is the shutdown residual
+// report: stream bindings left behind mean a flow cleanup did not finish,
+// UDP bindings age out on their registrar-granted expiry.
+func (l *Location) CountByKind() (udp, stream int) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	for _, b := range l.byToken {
+		if b.FlowID == 0 {
+			udp++
+		} else {
+			stream++
+		}
+	}
+	return udp, stream
 }
 
 // Prune drops expired bindings. Called periodically by the proxy so a

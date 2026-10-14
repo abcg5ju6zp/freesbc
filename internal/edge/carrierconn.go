@@ -56,6 +56,11 @@ type carrierConns struct {
 
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex // one dial at a time per destination
+
+	// dials is held by a dial goroutine until it has finished admitting
+	// and handshaking its connection. Shutdown waits it before sweeping
+	// flows, so it cannot close a connection a dial is still wrapping.
+	dials sync.WaitGroup
 }
 
 // newCarrierConns builds the TLS configs of the tls carriers and the
@@ -193,8 +198,14 @@ func (cc *carrierConns) ensure(ctx context.Context, name, network, dest string) 
 	}
 }
 
+// waitDials blocks until every in-flight dial has finished admitting and
+// handshaking its connection. Called on shutdown before the flow sweep.
+func (cc *carrierConns) waitDials() { cc.dials.Wait() }
+
 // dial opens, handshakes and hands over one connection to a carrier.
 func (cc *carrierConns) dial(ctx context.Context, name, network, dest string) error {
+	cc.dials.Add(1)
+	defer cc.dials.Done()
 	s := cc.s
 	lim := s.streamLim
 	ap, err := netip.ParseAddrPort(dest)
@@ -223,6 +234,7 @@ func (cc *carrierConns) dial(ctx context.Context, name, network, dest string) er
 		return fmt.Errorf("connection cap reached (%s)", streamRefusalLabels[why])
 	}
 	c := &streamConn{Conn: raw, l: l, ap: ap, remote: dest, lim: lim, fr: &sipFramer{max: lim.maxMessage}, carrier: true}
+	c.flowID = s.flows.issue(network, ap, c, true)
 	s.metrics.StreamConnOpened(network)
 	if network == config.CarrierTLS {
 		tc := tls.Client(raw, cc.tls[name])

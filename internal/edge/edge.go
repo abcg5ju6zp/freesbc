@@ -153,6 +153,12 @@ type Server struct {
 	// before Run.
 	streams   *streamTable
 	streamLim streamLimits
+
+	// flows hands each accepted or dialed stream connection its fixed
+	// generation; reaper runs the ordered teardown of a lost flow
+	// (flow.go).
+	flows  *flowRegistry
+	reaper *flowReaper
 }
 
 const (
@@ -256,6 +262,7 @@ func New(store *config.Store, log *slog.Logger, opts ...Option) (*Server, error)
 		webrtcEnabled:    cfg.WebRTC(),
 		streams:          newStreamTable(),
 		streamLim:        defaultStreamLimits(),
+		flows:            newFlowRegistry(),
 	}
 	s.carrierByName = map[string]config.Carrier{}
 	for _, c := range cfg.CarrierList() {
@@ -268,6 +275,12 @@ func New(store *config.Store, log *slog.Logger, opts ...Option) (*Server, error)
 	s.pubPool, s.privPool = newMediaPools(cfg, topo, s.mediaTimeout)
 	s.dialogs = newDialogTable(s.metrics, s.log)
 	s.subs = newSubTable(s.metrics)
+	s.reaper = newFlowReaper(s)
+	// A stream registrar response may install a binding only while the
+	// connection it arrived on is still open: a 200 for a retired flow
+	// would aim inbound requests at a dead socket.
+	flows := s.flows
+	s.loc.flowAlive = func(id flowID) bool { return flows.alive(id) }
 	// A subscription belongs to a registration binding: when the binding
 	// goes (un-REGISTER, WebSocket close, expiry) its records go too.
 	s.loc.SetOnRemove(s.subs.dropTokens)
@@ -659,6 +672,8 @@ func (s *Server) Run(ctx context.Context) error {
 	if err := s.awaitUDPServing(ctx, opened, errs); err != nil {
 		listenCancel()
 		wg.Wait()
+		s.waitListenersSettled(opened)
+		s.reaper.closeOpenFlows()
 		s.dialogs.closeAll()
 		s.subs.closeAll()
 		return err
@@ -751,17 +766,83 @@ func (s *Server) Run(ctx context.Context) error {
 	// and attach no media (it answers 503, and a session it already
 	// allocated is closed by attach), so nothing is allocated after this
 	// point or outlives Run (audit P2-EDG-027). Then close the listeners
-	// and wait for them, and end every dialog: every media session is torn
-	// down explicitly, so no socket, port reservation or relay goroutine
-	// outlives Run. There is no BYE on this plane's shutdown: the calls
-	// are dropped (docs/design.md §4.5).
+	// and wait for them. Every stream flow then gets its own bounded,
+	// ordered teardown (bindings, subscriptions and early dialogs
+	// converged, connection slots released) rather than waiting on a peer
+	// that is already gone; finally every remaining dialog is ended: every
+	// media session is torn down explicitly, so no socket, port
+	// reservation or relay goroutine outlives Run. There is no BYE on this
+	// plane's shutdown: the calls are dropped (docs/design.md §4.5). What
+	// is still occupied afterwards is reported, not hidden.
 	s.dialogs.close()
 	s.subs.close()
 	listenCancel()
 	wg.Wait()
+	// Let every accepted connection finish preparing (and every carrier
+	// dial finish admitting) before the flow sweep: a goroutine still
+	// wrapping or handshaking its connection must not race the sweep
+	// closing it. Bounded by the handshake deadlines.
+	s.waitListenersSettled(opened)
+	s.reaper.closeOpenFlows()
 	s.dialogs.closeAll()
 	s.subs.closeAll()
+	s.reportShutdownResidual()
 	return runErr
+}
+
+// waitListenersSettled waits for the accept loops and in-flight prepares of
+// every opened stream listener, and for in-flight carrier dials.
+func (s *Server) waitListenersSettled(opened []listener) {
+	for _, l := range opened {
+		if sl, ok := l.stream.(*streamListener); ok {
+			sl.waitSettled()
+		}
+	}
+	s.carrierConns.waitDials()
+}
+
+// shutdownResidual is what still occupies the plane after the bounded
+// shutdown cleanup. Stream bindings, subscriptions, dialogs and open
+// connections should be zero: their cleanup is entirely local. UDP
+// bindings are expected: UDP owns no connection FreeSBC can close, so they
+// age out on their registrar-granted expiry and refresh at the registrar.
+type shutdownResidual struct {
+	udpBindings    int
+	streamBindings int
+	subscriptions  int
+	dialogs        int
+	streamConns    int
+	retirements    int
+}
+
+func (s *Server) shutdownResidual() shutdownResidual {
+	udp, stream := s.loc.CountByKind()
+	return shutdownResidual{
+		udpBindings:    udp,
+		streamBindings: stream,
+		subscriptions:  s.subs.count(),
+		dialogs:        s.dialogs.sessionCount(),
+		streamConns:    s.streams.open(),
+		retirements:    s.reaper.activeRetirements(),
+	}
+}
+
+// reportShutdownResidual logs the bounded cleanup's outcome: one clean
+// INFO line when everything local converged (UDP registrations left to
+// expire, as designed), a WARN naming the residue otherwise.
+func (s *Server) reportShutdownResidual() {
+	r := s.shutdownResidual()
+	args := []any{
+		"udp_bindings", r.udpBindings, "stream_bindings", r.streamBindings,
+		"subscriptions", r.subscriptions, "dialogs", r.dialogs,
+		"stream_connections", r.streamConns, "unfinished_flow_cleanups", r.retirements,
+	}
+	if r.streamBindings == 0 && r.subscriptions == 0 && r.dialogs == 0 &&
+		r.streamConns == 0 && r.retirements == 0 {
+		s.log.Info("edge plane stopped; bounded cleanup complete (UDP bindings expire at the registrar)", args...)
+		return
+	}
+	s.log.Warn("edge plane stopped with residual state after bounded cleanup", args...)
 }
 
 // udpServingTimeout bounds how long Run waits for sipgo to pool its UDP

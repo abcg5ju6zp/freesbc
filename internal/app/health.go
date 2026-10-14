@@ -51,6 +51,20 @@ type healthInputs struct {
 	AdminPlainRemote bool
 	// AckMisses is the recent 2xx ACK misses per plane, over ackMissWindow.
 	AckMisses []edge.AckMiss
+	// Shield is the shield snapshot persistence/recovery status.
+	Shield ShieldHealth
+}
+
+// ShieldHealth is the subset of shield.Status health derives from.
+type ShieldHealth struct {
+	Enabled          bool
+	Phase            string
+	RecoveryResult   string
+	StaleGenerations []string
+	LastSaveAt       time.Time
+	LastSaveErrorAt  time.Time
+	FatalError       string
+	Path             string
 }
 
 // healthSource derives the raw active conditions from healthInputs. Only
@@ -73,6 +87,7 @@ func newHealthSource(edgeSrv *edge.Server, running *config.Config, reload func()
 		if reload != nil {
 			rs = reload()
 		}
+		ss := edgeSrv.ShieldState()
 		return healthInputs{
 			Switch:           edgeSrv.SwitchNodes(),
 			Carriers:         edgeSrv.Carriers(),
@@ -82,6 +97,11 @@ func newHealthSource(edgeSrv *edge.Server, running *config.Config, reload func()
 			BanRejected:      edgeSrv.ShieldStats().BanAddsRejected,
 			AdminPlainRemote: plain,
 			AckMisses:        edgeSrv.AckMisses(ackMissWindow),
+			Shield: ShieldHealth{
+				Enabled: ss.Enabled, Phase: ss.Phase, RecoveryResult: ss.RecoveryResult,
+				StaleGenerations: ss.StaleGenerations, LastSaveAt: ss.LastSaveAt,
+				LastSaveErrorAt: ss.LastSaveErrorAt, FatalError: ss.FatalError, Path: ss.Path,
+			},
 		}
 	}}
 }
@@ -189,6 +209,38 @@ func (h *healthSource) derive(in healthInputs) []admin.HealthCondition {
 		})
 	}
 
+	if in.Shield.Enabled {
+		switch in.Shield.Phase {
+		case "fatal":
+			out = append(out, admin.HealthCondition{
+				ID:       "shield_state_corrupt",
+				Severity: admin.HealthCritical,
+				Message:  "the shield state snapshot failed verification; no public listener is open",
+				Detail:   in.Shield.FatalError + " (state file " + in.Shield.Path + "; quarantined; repair and restart)",
+			})
+		}
+		if len(in.Shield.StaleGenerations) > 0 {
+			short := make([]string, len(in.Shield.StaleGenerations))
+			for i, g := range in.Shield.StaleGenerations {
+				short[i] = shieldGenerationShort(g)
+			}
+			out = append(out, admin.HealthCondition{
+				ID:       "shield_state_stale_generation",
+				Severity: admin.HealthDegraded,
+				Message:  "restored shield state belongs to older shield rule generations; it stays in force until its own deadlines",
+				Detail:   "old generations still live: " + strings.Join(short, ", "),
+			})
+		}
+		if !in.Shield.LastSaveErrorAt.IsZero() && !in.Shield.LastSaveErrorAt.Before(in.Shield.LastSaveAt) {
+			out = append(out, admin.HealthCondition{
+				ID:       "shield_state_save_failed",
+				Severity: admin.HealthDegraded,
+				Message:  "the shield state snapshot cannot be written; security state is served from memory and writes are retried",
+				Detail:   "last failure at " + in.Shield.LastSaveErrorAt.UTC().Format(time.RFC3339),
+			})
+		}
+	}
+
 	for _, m := range in.AckMisses {
 		if m.Recent < ackMissThreshold {
 			continue
@@ -213,6 +265,14 @@ func (h *healthSource) derive(in healthInputs) []admin.HealthCondition {
 		})
 	}
 	return out
+}
+
+// shieldGenerationShort is the display form of a shield rule generation.
+func shieldGenerationShort(g string) string {
+	if len(g) > 12 {
+		return g[:12]
+	}
+	return g
 }
 
 // banCapActive records the counter and reports whether it rose within

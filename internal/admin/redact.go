@@ -30,6 +30,7 @@ func redactConfig(cfg *config.Config) any {
 			"invite_rate_limit":  cfg.Shield.InviteRateLimit,
 			"register_ban":       cfg.Shield.RegisterBan,
 			"admission_ban":      cfg.Shield.AdmissionBan,
+			"state_file":         cfg.Shield.StateFile,
 		},
 	}
 	if cfg.TLS != nil {

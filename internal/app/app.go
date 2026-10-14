@@ -177,16 +177,34 @@ func adminDeps(edgeSrv *edge.Server, version string, running *config.Config, sto
 			out := make([]admin.Ban, 0, len(page))
 			for _, b := range page {
 				out = append(out, admin.Ban{Source: b.Source, Kind: b.Kind, Reason: b.Reason,
-					Since: b.Since, Until: b.Until})
+					Generation: b.Generation, Since: b.Since, Until: b.Until})
 			}
 			return out, total, rejected
+		},
+		Unban: edgeSrv.Unban,
+		ShieldState: func() admin.ShieldState {
+			st := edgeSrv.ShieldState()
+			return admin.ShieldState{
+				Enabled: st.Enabled, Path: st.Path, Phase: st.Phase, RecoveryResult: st.RecoveryResult,
+				ActiveGeneration: st.ActiveGeneration, SnapshotGeneration: st.SnapshotGeneration,
+				RestoredAt: st.RestoredAt,
+				Restored: admin.ShieldStateRestored{
+					IPBans: st.Restored.IPBans, UDPIPBans: st.Restored.UDPIPBans,
+					UDPSocketBans: st.Restored.UDPSocketBans, Offenders: st.Restored.Offenders,
+					Buckets: st.Restored.Buckets,
+				},
+				ExpiredSkipped: st.ExpiredSkipped, StaleGenerations: st.StaleGenerations,
+				LastSaveAt: st.LastSaveAt, LastSaveError: st.LastSaveError,
+				LastSaveErrorAt: st.LastSaveErrorAt, SavesOK: st.SavesOK,
+				SavesFailed: st.SavesFailed, FatalError: st.FatalError,
+			}
 		},
 		Offenders: func(limit int) ([]admin.Offender, int) {
 			top, total := edgeSrv.Offenders(limit)
 			out := make([]admin.Offender, 0, len(top))
 			for _, o := range top {
 				out = append(out, admin.Offender{Source: o.Source, Reason: o.Reason,
-					Strikes: o.Strikes, Since: o.Since, Until: o.Until})
+					Generation: o.Generation, Strikes: o.Strikes, Since: o.Since, Until: o.Until})
 			}
 			return out, total
 		},

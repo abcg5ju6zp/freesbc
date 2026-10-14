@@ -71,6 +71,7 @@ edge:
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = srv.shield.Close() })
 	ifname, ok, err := localInterface(srv.privAddr.Addr())
 	if err != nil || !ok {
 		t.Fatalf("localInterface(%s) = %q, %v, %v", srv.privAddr.Addr(), ifname, ok, err)

@@ -33,14 +33,22 @@ const offenderCap = 16384
 type offenderKey struct {
 	src    netip.Addr // bucketKey: an IPv4 address, an IPv6 /64
 	reason string
+	// gen is the shield rule generation the window opened under. Strikes
+	// under a newer generation open a separate window; the old one runs to
+	// its own deadline under the rules it was born with.
+	gen string
 }
 
 // offender is one source's strikes of one reason within a fixed window
-// that opens at its first strike.
+// that opens at its first strike. n is the threshold and banDur the ban
+// duration captured when the window opened, so a restored or
+// superseded-generation window always completes under its own rules.
 type offender struct {
 	key    offenderKey
 	start  time.Time
 	window time.Duration
+	banDur time.Duration
+	n      int
 	count  int
 	over   bool // the threshold was crossed in this window (WARN once)
 }
@@ -58,9 +66,11 @@ func newOffenderTable() *offenderTable {
 	return &offenderTable{entries: map[offenderKey]*list.Element{}, lru: list.New(), max: offenderCap, now: time.Now}
 }
 
-// strike adds one strike under lim and returns the window's count, whether
-// it is over lim.N, and whether this strike is the one that crossed it.
-func (t *offenderTable) strike(key offenderKey, lim config.StrikeLimit) (count int, over, crossed bool) {
+// strike adds one strike under lim and generation gen and returns the
+// window's count, whether it is over lim.N, and whether this strike is the
+// one that crossed it. banDur is the ban duration this generation applies
+// when the window crosses.
+func (t *offenderTable) strike(key offenderKey, lim config.StrikeLimit, banDur time.Duration) (count int, over, crossed bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.now()
@@ -68,7 +78,7 @@ func (t *offenderTable) strike(key offenderKey, lim config.StrikeLimit) (count i
 	if el, ok := t.entries[key]; ok {
 		o = el.Value.(*offender)
 		t.lru.MoveToFront(el)
-		if now.Sub(o.start) >= lim.Window {
+		if now.Sub(o.start) >= o.window {
 			o.start, o.count, o.over = now, 0, false
 		}
 	} else {
@@ -77,12 +87,11 @@ func (t *offenderTable) strike(key offenderKey, lim config.StrikeLimit) (count i
 			delete(t.entries, oldest.Value.(*offender).key)
 			t.lru.Remove(oldest)
 		}
-		o = &offender{key: key, start: now}
+		o = &offender{key: key, start: now, window: lim.Window, banDur: banDur, n: lim.N}
 		t.entries[key] = t.lru.PushFront(o)
 	}
-	o.window = lim.Window
 	o.count++
-	if o.count <= lim.N {
+	if o.count <= o.n {
 		return o.count, false, false
 	}
 	crossed = !o.over
@@ -90,13 +99,15 @@ func (t *offenderTable) strike(key offenderKey, lim config.StrikeLimit) (count i
 	return o.count, true, crossed
 }
 
-// clear forgets key's strikes.
-func (t *offenderTable) clear(key offenderKey) {
+// clear forgets every generation of src's strikes of reason.
+func (t *offenderTable) clear(src netip.Addr, reason string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if el, ok := t.entries[key]; ok {
-		delete(t.entries, key)
-		t.lru.Remove(el)
+	for k, el := range t.entries {
+		if k.src == src && k.reason == reason {
+			delete(t.entries, k)
+			t.lru.Remove(el)
+		}
 	}
 }
 
@@ -133,13 +144,64 @@ func (t *offenderTable) live() []offender {
 	return out
 }
 
+// storedOffender is one persisted strike window.
+type storedOffender struct {
+	Src        netip.Addr
+	Reason     string
+	Generation string
+	Start      time.Time
+	Window     time.Duration
+	BanDur     time.Duration
+	N          int
+	Count      int
+	Over       bool
+}
+
+// restore loads validated windows, skipping any already closed.
+func (t *offenderTable) restore(in []storedOffender) (restored, expired int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := t.now()
+	for _, e := range in {
+		if now.Sub(e.Start) >= e.Window {
+			expired++
+			continue
+		}
+		key := offenderKey{src: e.Src, reason: e.Reason, gen: e.Generation}
+		if _, dup := t.entries[key]; dup {
+			continue
+		}
+		if t.lru.Len() >= t.max {
+			oldest := t.lru.Back()
+			delete(t.entries, oldest.Value.(*offender).key)
+			t.lru.Remove(oldest)
+		}
+		o := &offender{key: key, start: e.Start, window: e.Window, banDur: e.BanDur, n: e.N, count: e.Count, over: e.Over}
+		t.entries[key] = t.lru.PushFront(o)
+		restored++
+	}
+	return restored, expired
+}
+
+// dump copies the open windows in the persistence record shape.
+func (t *offenderTable) dump() []storedOffender {
+	live := t.live()
+	out := make([]storedOffender, 0, len(live))
+	for _, o := range live {
+		out = append(out, storedOffender{Src: o.key.src, Reason: o.key.reason, Generation: o.key.gen,
+			Start: o.start, Window: o.window, BanDur: o.banDur, N: o.n, Count: o.count, Over: o.over})
+	}
+	return out
+}
+
 // Strike records one strike of reason (StrikeRegister) against src and
 // reports whether src is banned as a result. Over the reason's threshold
 // (a hot key, e.g. shield.register_ban) every further strike within the
-// window bans src's IP for shield.ban with reason as the ban reason; the
-// first is logged at WARN. Strikes are counted per source key (an IPv6
-// source by its /64, so an attacker rotating addresses inside its /64
-// shares one count), while the ban names the struck address.
+// window bans src's IP for shield.ban with reason as the ban reason, under
+// the rule generation active now; the first is logged at WARN. Strikes are
+// counted per source key (an IPv6 source by its /64, so an attacker
+// rotating addresses inside its /64 shares one count), while the ban names
+// the struck address.
 //
 // A carrier source is never struck, and an unknown reason or a threshold
 // of "off" counts nothing. The caller is responsible for the strike being
@@ -170,21 +232,24 @@ func (s *Shield) strike(src netip.Addr, reason string, udp bool) bool {
 	if lim.Off || lim.N <= 0 || lim.Window <= 0 {
 		return false
 	}
-	table, key := s.bans, offenderKey{bucketKey(src), reason}
+	gen := s.generation()
+	table, key := s.bans, offenderKey{src: bucketKeyFor(src), reason: reason, gen: string(gen)}
 	if udp {
 		table, key.reason = s.udpBans, reason+"_udp"
 	}
-	count, over, crossed := s.offenders.strike(key, lim)
+	count, over, crossed := s.offenders.strike(key, lim, cfg.Shield.Ban.Std())
 	if !over {
 		return false
 	}
-	if !table.ban(src, cfg.Shield.Ban.Std(), reason) {
+	if !table.ban(src, cfg.Shield.Ban.Std(), reason, string(gen)) {
 		s.log.Debug("shield ban table at hard cap; strike ban refused", "source", src, "reason", reason)
 		return false
 	}
+	s.markDirty()
 	if crossed {
 		s.log.Warn("shield banned source for repeated failures", "source", src, "reason", reason,
-			"strikes", count, "window", lim.Window.String(), "ban", cfg.Shield.Ban.Std().String())
+			"strikes", count, "window", lim.Window.String(), "ban", cfg.Shield.Ban.Std().String(),
+			"generation", gen.Short())
 	} else {
 		s.log.Debug("shield extended strike ban", "source", src, "reason", reason, "strikes", count)
 	}
@@ -192,11 +257,14 @@ func (s *Shield) strike(src netip.Addr, reason string, udp bool) bool {
 }
 
 // ClearStrikes forgets src's strikes of reason: the plane saw src succeed
-// (a 2xx registration), so its earlier failures were not an attack.
+// (a 2xx registration), so its earlier failures were not an attack. Every
+// rule generation of the reason is cleared, including a superseded one.
 func (s *Shield) ClearStrikes(src netip.Addr, reason string) {
-	s.offenders.clear(offenderKey{bucketKey(src), reason})
+	src = bucketKeyFor(src.Unmap())
+	s.offenders.clear(src, reason)
+	s.markDirty()
 	if reason == StrikeAdmission {
-		s.offenders.clear(offenderKey{bucketKey(src), StrikeAdmissionUDP})
+		s.offenders.clear(src, StrikeAdmissionUDP)
 	}
 }
 
@@ -235,6 +303,8 @@ type OffenderInfo struct {
 	Source string
 	// Reason is the strike reason (StrikeRegister).
 	Reason string
+	// Generation is the shield rule generation the window opened under.
+	Generation string
 	// Strikes is the count in the current window, which opened at Since
 	// and closes at Until.
 	Strikes      int
@@ -257,7 +327,13 @@ func (s *Shield) Offenders(limit int) (top []OffenderInfo, total int) {
 		if !live[i].start.Equal(live[j].start) {
 			return live[i].start.Before(live[j].start)
 		}
-		return live[i].key.src.Less(live[j].key.src)
+		if live[i].key.src != live[j].key.src {
+			return live[i].key.src.Less(live[j].key.src)
+		}
+		if live[i].key.reason != live[j].key.reason {
+			return live[i].key.reason < live[j].key.reason
+		}
+		return live[i].key.gen < live[j].key.gen
 	})
 	total = len(live)
 	top = make([]OffenderInfo, 0, min(limit, total))
@@ -266,7 +342,7 @@ func (s *Shield) Offenders(limit int) (top []OffenderInfo, total int) {
 		if o.key.src.Is6() {
 			src = netip.PrefixFrom(o.key.src, 64).String()
 		}
-		top = append(top, OffenderInfo{Source: src, Reason: o.key.reason, Strikes: o.count,
+		top = append(top, OffenderInfo{Source: src, Reason: o.key.reason, Generation: o.key.gen, Strikes: o.count,
 			Since: o.start, Until: o.start.Add(o.window)})
 	}
 	return top, total

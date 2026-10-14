@@ -278,6 +278,14 @@ func New(store *config.Store, log *slog.Logger, opts ...Option) (*Server, error)
 			return nil, err
 		}
 	}
+	// The security plane is built (and, with shield.state_file configured,
+	// its snapshot is recovered and verified) before Run opens any
+	// listener: a restart first restores the bans still in force, each
+	// under the rule generation that made it. A fatal verification failure
+	// is checked again in Run before binding.
+	s.shield = shield.New(s.store, s.log,
+		func(ip netip.Addr) bool { return s.carriers.snapshot().isSource(ip) },
+		shield.WithStateFile(cfg.Shield.StateFile))
 	return s, nil
 }
 
@@ -368,16 +376,18 @@ func (s *Server) PortStats() (inUse, total int) {
 	return pu + qu, pt + qt
 }
 
-// ShieldStats is the shield's drop counters for the admin API. It is the
-// zero value until Run has created the shield.
+// ShieldStats is the shield's drop counters for the admin API.
 func (s *Server) ShieldStats() shield.Stats {
-	s.shieldMu.RLock()
-	sh := s.shield
-	s.shieldMu.RUnlock()
-	if sh == nil {
-		return shield.Stats{DropsByReason: map[string]int64{}}
-	}
-	return sh.Stats()
+	return s.shield.Stats()
+}
+
+// ShieldState is the shield snapshot persistence/recovery status.
+func (s *Server) ShieldState() shield.Status { return s.shield.State() }
+
+// Unban removes exactly one shield ban matching kind, source and the rule
+// generation it was created under.
+func (s *Server) Unban(kind, source, generation string) (bool, error) {
+	return s.shield.Unban(kind, source, generation)
 }
 
 // Bans is one page of the shield's live bans, the total, and the cumulative
@@ -591,11 +601,19 @@ func (s *Server) Run(ctx context.Context) error {
 	defer client.Close()
 	s.client = client
 
-	sh := shield.New(s.store, s.log, func(ip netip.Addr) bool { return s.carriers.snapshot().isSource(ip) })
+	sh := s.shield
 	defer sh.Close()
-	s.shieldMu.Lock()
-	s.shield = sh
-	s.shieldMu.Unlock()
+	// Fail-closed startup: if the shield snapshot could not be verified,
+	// bind neither the public listeners nor the trusted socket. The
+	// process stays up so the admin plane can report the recovery status;
+	// nothing serves until the state file is repaired and the process
+	// restarted.
+	if rec := sh.State(); rec.Enabled && rec.Phase == shield.PhaseFatal {
+		s.log.Error("edge opens no listeners: shield state recovery failed",
+			"path", rec.Path, "err", rec.FatalError)
+		<-ctx.Done()
+		return nil
+	}
 
 	srv.OnRegister(s.guard(s.onRegister))
 	srv.OnInvite(s.guard(s.onInvite))

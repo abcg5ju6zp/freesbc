@@ -29,6 +29,7 @@ edge:
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = srv.shield.Close() })
 	return srv
 }
 

@@ -8,6 +8,12 @@ import (
 	"github.com/freesbc/freesbc/internal/config"
 )
 
+// testGen is the generation the table-level tests create their state
+// under (the format length is enforced only on snapshot recovery).
+const testGen = "g1"
+
+func testBucketKey(ip netip.Addr) bucketKey { return bucketKey{addr: ip, gen: testGen} }
+
 func TestRateLimiterBurstThenThrottle(t *testing.T) {
 	r := newRateLimiter()
 	now := time.Unix(1000, 0)
@@ -16,16 +22,16 @@ func TestRateLimiterBurstThenThrottle(t *testing.T) {
 
 	// capacity = rate = 3: first 3 allowed, 4th denied within the same instant.
 	for i := 0; i < 3; i++ {
-		if !r.allow(ip, 3, time.Second, true) {
+		if !r.allow(ip, 3, time.Second, true, testGen) {
 			t.Fatalf("token %d should be allowed", i)
 		}
 	}
-	if r.allow(ip, 3, time.Second, true) {
+	if r.allow(ip, 3, time.Second, true, testGen) {
 		t.Fatal("4th token in the same instant must be denied")
 	}
 	// after 1 second, the bucket has fully refilled (3 tokens).
 	now = now.Add(time.Second)
-	if !r.allow(ip, 3, time.Second, true) {
+	if !r.allow(ip, 3, time.Second, true, testGen) {
 		t.Fatal("token after full refill should be allowed")
 	}
 }
@@ -37,12 +43,12 @@ func TestRateLimiterPerIPIsolation(t *testing.T) {
 	a := netip.MustParseAddr("203.0.113.1")
 	b := netip.MustParseAddr("203.0.113.2")
 	// exhaust a
-	r.allow(a, 1, time.Second, true)
-	if r.allow(a, 1, time.Second, true) {
+	r.allow(a, 1, time.Second, true, testGen)
+	if r.allow(a, 1, time.Second, true, testGen) {
 		t.Fatal("a exhausted")
 	}
 	// b unaffected
-	if !r.allow(b, 1, time.Second, true) {
+	if !r.allow(b, 1, time.Second, true, testGen) {
 		t.Fatal("b must have its own bucket")
 	}
 }
@@ -54,11 +60,44 @@ func TestRateLimiterGlobal(t *testing.T) {
 	a := netip.MustParseAddr("203.0.113.1")
 	b := netip.MustParseAddr("203.0.113.2")
 	// perIP=false → one shared bucket of capacity 1; a consumes it, b denied.
-	if !r.allow(a, 1, time.Second, false) {
+	if !r.allow(a, 1, time.Second, false, testGen) {
 		t.Fatal("first global token allowed")
 	}
-	if r.allow(b, 1, time.Second, false) {
+	if r.allow(b, 1, time.Second, false, testGen) {
 		t.Fatal("global bucket shared: b must be denied")
+	}
+}
+
+// A new generation starts a fresh bucket; the old one is neither charged
+// nor refilled under the new rate.
+func TestRateLimiterGenerationsSeparate(t *testing.T) {
+	r := newRateLimiter()
+	now := time.Unix(1000, 0)
+	r.now = func() time.Time { return now }
+	ip := netip.MustParseAddr("203.0.113.7")
+	r.allow(ip, 1, time.Second, true, testGen) // g1 drained
+	if r.allow(ip, 1, time.Second, true, testGen) {
+		t.Fatal("same generation bucket must be empty")
+	}
+	// g2 gets a full bucket of its own and drains independently.
+	if !r.allow(ip, 1, time.Second, true, "g2") {
+		t.Fatal("a new generation must start from a full bucket of its own")
+	}
+	if r.allow(ip, 1, time.Second, true, "g2") {
+		t.Fatal("the new generation's bucket did not drain")
+	}
+	// g1 was not credited or refilled by either g2 request.
+	if r.allow(ip, 1, time.Second, true, testGen) {
+		t.Fatal("the old generation must not share the new bucket")
+	}
+	// Both buckets are carried until the old one would have refilled.
+	if len(r.buckets) != 2 {
+		t.Fatalf("buckets = %d, want one per generation", len(r.buckets))
+	}
+	now = now.Add(time.Hour)
+	r.prune()
+	if len(r.buckets) != 0 {
+		t.Fatalf("after an hour both generations' buckets must be pruned, have %d", len(r.buckets))
 	}
 }
 
@@ -67,8 +106,8 @@ func TestRateLimiterPruneDropsIdle(t *testing.T) {
 	now := time.Unix(1000, 0)
 	r.now = func() time.Time { return now }
 	ip := netip.MustParseAddr("203.0.113.7")
-	r.allow(ip, 5, time.Second, true) // creates a bucket
-	now = now.Add(time.Hour)          // long idle → bucket refills to full
+	r.allow(ip, 5, time.Second, true, testGen) // creates a bucket
+	now = now.Add(time.Hour)                   // long idle → bucket refills to full
 	r.prune()
 	if len(r.buckets) != 0 {
 		t.Fatalf("prune should drop the idle/full bucket, have %d", len(r.buckets))
@@ -83,15 +122,15 @@ func TestRateLimiterLRUCap(t *testing.T) {
 	now := time.Unix(1000, 0)
 	r.now = func() time.Time { return now }
 	for i := 0; i <= bucketCap; i++ {
-		r.allow(capIP(i), 1, time.Second, true)
+		r.allow(capIP(i), 1, time.Second, true, testGen)
 	}
 	if got := len(r.buckets); got != bucketCap {
 		t.Fatalf("buckets = %d, want the cap %d", got, bucketCap)
 	}
-	if _, ok := r.buckets[capIP(0)]; ok {
+	if _, ok := r.buckets[testBucketKey(capIP(0))]; ok {
 		t.Error("the least recently used bucket was not the one evicted")
 	}
-	if _, ok := r.buckets[capIP(bucketCap)]; !ok {
+	if _, ok := r.buckets[testBucketKey(capIP(bucketCap))]; !ok {
 		t.Error("the newest bucket is missing")
 	}
 }
@@ -102,17 +141,17 @@ func TestRateLimiterKeysIPv6By64(t *testing.T) {
 	r := newRateLimiter()
 	now := time.Unix(1000, 0)
 	r.now = func() time.Time { return now }
-	if !r.allow(netip.MustParseAddr("2001:db8:1:2::1"), 1, time.Second, true) {
+	if !r.allow(netip.MustParseAddr("2001:db8:1:2::1"), 1, time.Second, true, testGen) {
 		t.Fatal("first token refused")
 	}
-	if r.allow(netip.MustParseAddr("2001:db8:1:2:ffff::9"), 1, time.Second, true) {
+	if r.allow(netip.MustParseAddr("2001:db8:1:2:ffff::9"), 1, time.Second, true, testGen) {
 		t.Error("another address in the same /64 got its own bucket")
 	}
-	if !r.allow(netip.MustParseAddr("2001:db8:1:3::1"), 1, time.Second, true) {
+	if !r.allow(netip.MustParseAddr("2001:db8:1:3::1"), 1, time.Second, true, testGen) {
 		t.Error("a different /64 must have its own bucket")
 	}
-	r.allow(netip.MustParseAddr("192.0.2.1"), 1, time.Second, true)
-	if r.allow(netip.MustParseAddr("::ffff:192.0.2.1"), 1, time.Second, true) {
+	r.allow(netip.MustParseAddr("192.0.2.1"), 1, time.Second, true, testGen)
+	if r.allow(netip.MustParseAddr("::ffff:192.0.2.1"), 1, time.Second, true, testGen) {
 		t.Error("a 4in6 source must share its IPv4 bucket")
 	}
 }
@@ -124,7 +163,7 @@ func TestRateLimiterPruneHonoursInterval(t *testing.T) {
 	now := time.Unix(1000, 0)
 	r.now = func() time.Time { return now }
 	ip := netip.MustParseAddr("203.0.113.8")
-	r.allow(ip, 10, time.Hour, true)
+	r.allow(ip, 10, time.Hour, true, testGen)
 	now = now.Add(59 * time.Minute)
 	r.prune()
 	if len(r.buckets) != 1 {

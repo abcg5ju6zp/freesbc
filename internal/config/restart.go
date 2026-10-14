@@ -27,6 +27,9 @@ var restartOnly = []struct {
 	{"edge.srtp", func(c *Config) any { return c.Edge.SRTP }},
 	{"edge.allow_insecure_sdes", func(c *Config) any { return c.Edge.AllowInsecureSDES }},
 	{"edge.carrier_sources", func(c *Config) any { return c.Edge.CarrierSources }},
+	// Only shield.state_file is restart-only within the shield section;
+	// every other shield.* key stays hot.
+	{"shield.state_file", func(c *Config) any { return c.Shield.StateFile }},
 	{"admin", func(c *Config) any { return c.Admin }},
 }
 

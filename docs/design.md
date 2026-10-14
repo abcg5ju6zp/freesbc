@@ -13,9 +13,12 @@ and validation rule is in `docs/config.md`.
 
 FreeSBC is a single-process, single-binary edge session border controller. It
 has no database, no external media process, no kernel module and no
-clustering layer. All runtime state (dialogs, registrations, carrier
-registration tokens, bans, media sessions, port reservations) lives in memory
-and is lost on restart.
+clustering layer. Runtime state (dialogs, registrations, carrier
+registration tokens, media sessions, port reservations) lives in memory
+and is lost on restart. The one exception is the shield's security state:
+with `shield.state_file` set, the live bans, strike windows and drained
+rate buckets are snapshotted to an authenticated local file and recovered
+before any listener opens (§14.2).
 
 It is a **stateful SIP proxy**, not a B2BUA, implemented in one package
 (`internal/edge`). It sits between three kinds of far end and one switch:
@@ -75,7 +78,7 @@ end-to-end.
 | Carrier directory, carrier registration tokens, topology hiding toward carriers | DNS: the Go resolver |
 | Port allocation, latching, relay loops, watchdog | SRTP transforms: `pion/srtp/v3`; DTLS handshake and key export: `pion/dtls/v3`; ICE connectivity checks: `pion/ice/v4` |
 | SDP codec intersection and body construction | SDP syntax: `pion/sdp/v3` |
-| In-memory ban table, rate limiting, scanner signatures | (there is no kernel-level ban enforcement) |
+| Ban table, rate limiting, scanner signatures (memory, optionally an authenticated local snapshot file) | (there is no kernel-level ban enforcement) |
 | Config schema, validation, atomic hot-swap | YAML parsing: `goccy/go-yaml`; file-change notification: `fsnotify` |
 | Admin HTTP API, WebUI, metric collection | Metric exposition: `prometheus/client_golang` |
 | | **All call logic**: the switch decides what a call does; FreeSBC decides only where a message goes and how media is anchored |
@@ -454,8 +457,9 @@ sipgo client and user agent) fires after all of this.
 (`admin/server.go:313-315`). In-flight HTTP requests are drained up to that
 budget.
 
-**Shield.Close**: cancel the prune loop and wait for it. Bans are in memory
-only, so none survive the process.
+**Shield.Close**: cancel the prune loop and wait for it, writing one final
+best-effort snapshot when `shield.state_file` is enabled and recovery was
+not fatal.
 
 Exit codes: 0 on a clean shutdown, 1 on any fatal component error or a bad
 config at startup, 2 on a usage error.
@@ -3393,8 +3397,9 @@ The topology is two addresses, each written once (`docs/config.md`).
 ### 12.4 No kernel firewall integration
 
 FreeSBC manages no kernel firewall state. Every ban lives in the shield's
-in-memory table (§14.1). A deployment that wants kernel-level drops puts its
-own firewall in front of FreeSBC.
+in-memory table (§14.1), optionally mirrored to a snapshot file so it
+survives a restart (§14.2). A deployment that wants kernel-level drops puts
+its own firewall in front of FreeSBC.
 
 ### 12.5 TLS
 
@@ -3498,9 +3503,14 @@ permanent series per call."
 | `freesbc_edge_carrier_registrations` | Gauge | `carrier` | live carrier registrations per `edge.carriers` name, republished from the carrier registration table on every change and every prune tick (`carrierreg.go:126`) |
 
 `freesbc_shield_drops_total` reports the edge shield, the only shield there is
-(`edge.go` `Run` creates it). Its `banned` and `scanner` branches are
-reachable there. Current ban counts and ban-table overflow are kept in
-`shield.Stats` but not exported as metrics, and there is no unban API.
+(`edge.New` creates it). Its `banned` and `scanner` branches are reachable
+there. Current ban counts and ban-table overflow are kept in `shield.Stats`
+but not exported as metrics. Snapshot persistence (§14.2) exports
+`freesbc_shield_state_enabled`, `freesbc_shield_state_recovery_result{result}`
+(`disabled`, `empty`, `same_generation`, `stale_generation`, `fatal`, one-hot),
+`freesbc_shield_state_saves_total{result="ok|failed"}` and
+`freesbc_shield_state_restored_entries{kind}`. An explicit unban exists:
+`DELETE /api/shield/bans` scoped by kind, source and rule generation (§14.2).
 
 The Go runtime collector (`collectors.NewGoCollector`) and the process collector (`collectors.NewProcessCollector`: `process_cpu_seconds_total`, `process_resident_memory_bytes`, `process_open_fds` and the like, Linux only apart from `process_start_time_seconds`) are registered too.
 
@@ -3547,8 +3557,9 @@ Host and Origin checks (§14, Admin) before any auth work, on every route but
 | `/api/tls` | GET (else 405 + `Allow: GET`) | Basic | `{"loaded": false}` when no listener loaded the top-level `tls` pair; else `{"loaded": true, "subject" (CN), "sans", "issuer", "not_before", "not_after" (RFC 3339 UTC), "key_type", "key_size", "key_curve", "fingerprint_sha256", "cert_file", "key_file", "loaded_at", "listeners" (`tls`/`wss` from the edge, `admin`), "days_to_expiry" (whole days, truncated toward zero, negative once expired, 0 within a day), "expired", "expiring_soon" (under 30 days, not expired), "disk_differs", "disk_error"}` (`handleTLS`, `tlscert.go`). The leaf is `Certificate[0]`, kept at load by `edge.noteTLSLeaf` (`Server.TLSCert`, wired as `Deps.TLSCert`) and by `Run` for remote admin HTTPS; the edge's wins, as both read the same pair. `disk_differs` re-reads the first certificate of the cert file on each request only (never on a timer). Never the key or PEM |
 | `/api/registrations` | GET (else 405 + `Allow: GET`) | Basic | `?user=&limit=&offset=` (`handleRegistrations`, `state.go:142`): `{"items":[{"aor","user","transport","source" (IP:port),"expires_in" (seconds)}],"total","limit","offset"}`. `user` is a case-insensitive substring of the user part (at most 256 bytes); `limit` defaults to 100 and is clamped to 1000; a `limit` below 1 or non-numeric, a negative or non-numeric `offset` or an over-long `user` is 400. `total` counts the matches. Sorted by AoR, source, transport. Read from `Location.Registrations` (`location.go:423`) under its read lock. No Contact, token or Call-ID |
 | `/api/carrier-registrations` | GET (else 405) | Basic | array of `{"carrier","user","token","node","expires_in"}`; always an array. The switch's live registrations at carriers (`carrierRegTable.snapshot`, `carrierreg.go:312`); `token` is the opaque `fsbc` value in the carrier Contact, `node` the registering switch node |
-| `/api/shield/bans` | GET (else 405) | Basic | `?limit=&offset=` (`handleBans`, `state.go:193`): `{"items":[{"source","kind" ("ip", "udp_ip" or "udp_socket"),"reason","since" (RFC 3339),"remaining" (seconds)}],"total","limit","offset","ban_adds_rejected"}`. Both ban tables merged, newest first (`Shield.Bans`, `shield.go:287`); limit and offset as for registrations. `reason` is `scanner`, `register` or `admission`; `udp_ip` is an IP banned on UDP only (rate limiting and enumeration only drop). `ban_adds_rejected` is the cumulative additions refused at the 65536 cap |
-| `/api/shield/offenders` | GET (else 405) | Basic | `?limit=` (`handleOffenders`, `state.go`): `{"items":[{"source" (IPv4 address or IPv6 /64),"reason" ("register"),"strikes","since" (RFC 3339, the window opened),"remaining" (seconds of the window)}],"total","limit"}`, most strikes first (`Shield.Offenders`, `offenders.go`); limit default 100, at most 1000 |
+| `/api/shield/bans` | GET; DELETE (else 405 + `Allow: GET, DELETE`) | Basic | GET `?limit=&offset=` (`listBans`, `state.go`): `{"items":[{"source","kind" ("ip", "udp_ip" or "udp_socket"),"reason","generation" (64 hex rule generation),"since" (RFC 3339),"remaining" (seconds)}],"total","limit","offset","ban_adds_rejected"}`. The three ban tables merged, newest first (`Shield.Bans`); limit and offset as for registrations. `reason` is `scanner`, `register` or `admission`; `udp_ip` is an IP banned on UDP only (rate limiting and enumeration only drop). `ban_adds_rejected` is the cumulative additions refused at the 65536 cap. DELETE `?kind=&source=&generation=` (`handleUnban`) removes exactly that one live entry: 400 on a malformed selector, 404 on a miss, 200 `{"unbanned","kind","source","generation"}` on a hit; Origin check required, audited as `shield_unban` |
+| `/api/shield/offenders` | GET (else 405) | Basic | `?limit=` (`handleOffenders`, `state.go`): `{"items":[{"source" (IPv4 address or IPv6 /64),"reason" ("register", "admission" or "admission_udp"),"generation" (64 hex),"strikes","since" (RFC 3339, the window opened),"remaining" (seconds of the window)}],"total","limit"}`, most strikes first (`Shield.Offenders`, `offenders.go`); limit default 100, at most 1000 |
+| `/api/shield/state` | GET (else 405) | Basic | the snapshot persistence/recovery status (`handleShieldState`, §14.2): `{"enabled","path","phase" ("disabled","empty","restored","fatal"),"recovery_result" ("disabled","empty","same_generation","stale_generation","fatal"),"active_generation","snapshot_generation" (or null),"restored_at" (or null),"restored":{"ip_bans","udp_ip_bans","udp_socket_bans","offenders","buckets"},"expired_skipped","stale_generations" (still live, [] when none),"last_save_at","last_save_error","last_save_error_at" (each RFC 3339 or null),"saves_ok","saves_failed","fatal_error" (or null)}` |
 | `/api/switch-nodes` | GET (else 405) | Basic | array of `{"address","state" ("healthy" or "cooling_down"),"cooldown_remaining" (seconds),"last_failure" (RFC 3339 or null)}`; always an array, one per `edge.switch` entry, sorted by address (`cooldownTable.snapshot`, `cooldown.go:76`) |
 | `/api/carriers` | GET (else 405) | Basic | array of `{"name","host","transport","mode" ("literal", "srv", "a" or "" until resolved),"addresses":[{"address","in_use"}],"resolved_at","expires_at" (RFC 3339 or null),"cache_age_seconds" (or null),"failing","last_error"}`; always an array, sorted by name (`carrierDirectory.snapshotInfo`, `carrierdns.go:474`). `in_use` marks the first address, the one the edge sends to. While `failing`, `expires_at` is the next retry and the addresses are the last good set |
 | `/api/drain` | GET, POST, DELETE (else 405 + `Allow: GET, POST, DELETE`) | Basic | `{"draining": bool, "since": RFC 3339 or null, "active_calls": int}` (`handleDrain`, `api.go:96`). POST enters drain mode, DELETE leaves it; both are idempotent (a repeated POST keeps the original `since`) and answer with the same body as GET. POST and DELETE need the Origin check below. 404 when `Deps.DrainState` or `Deps.SetDraining` is nil. Each actual change is logged at Info with the remote address and `active_calls`; each actual change is also recorded as `drain_on` / `drain_off` (§13.5) |
@@ -3712,6 +3723,7 @@ action can reuse the path):
 | `login_failed` | `bad_credentials` | Basic credentials were presented, or `POST /api/login` was sent, and the username or password did not verify |
 | `drain_on` | `ok` | `handleDrain` (`api.go`): a POST /api/drain that actually entered drain mode (`SetDraining` returned changed). A repeated POST, a GET and any request refused before the toggle are not events |
 | `drain_off` | `ok` | a DELETE /api/drain that actually left drain mode, same rule |
+| `shield_unban` | `ok` | `handleUnban` (`state.go`): a DELETE /api/shield/bans that removed exactly one live ban matching kind/source/generation. A 400 or 404 is not an event |
 | `login_limited` | `rate_limited` | the per-source limiter answered 429 (Basic or `/api/login`), **once per lockout window per limiter key**: only the first 429 of a window is an event (`authFailEntry.denied`, set by `reserve` under the limiter's lock and cleared when a new window starts), so a locked-out source cannot flush the ring or flood the log |
 
 A request with no credentials (no session cookie and no parseable Basic header) is **not** an event: it guesses
@@ -3757,14 +3769,19 @@ record an outcome, never across a DNS lookup, so `Server.Carriers` (and with it
 | `config_restart_required` | `degraded` | `ReloadStatus.RestartRequired` is non-empty; `detail` lists the restart-only keys whose file value the running process does not use. Cleared by a restart (or by reverting the file) |
 | `rtp_ports` | `degraded` at 90 % or more of the pairs in use; `critical` at 100 % | `edge.Server.PortStats`; `portsDegradedPercent` is a constant, not a config key |
 | `shield_ban_cap` | `degraded` | `Shield.Stats().BanAddsRejected` rose since the previous evaluation; cleared when it has not risen for `banCapQuiet` = **60 s** (state in `healthSource`, which sees every evaluation) |
+| `shield_state_corrupt` | `critical` | `Shield.State().Phase == fatal`: the snapshot failed verification at start (HMAC, format, bounds, missing key); no listener is open; `detail` carries the reason and the quarantined path |
+| `shield_state_stale_generation` | `degraded` | live entries still carry shield rule generations older than the current one; `detail` lists the short generations. Cleared once the old-generation state finishes |
+| `shield_state_save_failed` | `degraded` | the latest periodic/shutdown snapshot write failed after the last good save (`LastSaveErrorAt ≥ LastSaveAt`); serving continues from memory and writes retry every minute. Cleared on the next good save |
 | `ack_missed:<plane>` (`public` or `private`) | `degraded` | `edge.Server.AckMisses`: at least `ackMissThreshold` = **3** 2xx ACK misses of that plane within `ackMissWindow` = **10 min** (`ackMissTracker` keeps the last 32 miss times per plane); the message names the advertised Contact/Record-Route URI to check for NAT/firewall reachability. Clears when the window holds fewer |
 | `tls_cert_expiry` | `degraded` under 30 days to not-after (`tlsExpiryWarn`); `critical` once expired | the top-level `tls` leaf the process loaded (the same record as `/api/tls`, `Server.tlsRecord`); added by admin itself (`Server.healthConditions`, `tlscert.go`) on top of `Deps.Health`. It never reads the cert file, so a renewal on disk is shown by `/api/tls` (`disk_differs`) only. Absent when no leaf is loaded |
 | `admin_plain_remote` | `critical` | admin would serve plain HTTP on a non-loopback address; validation makes it impossible, so this is a sanity check |
 
-Absent on purpose: a listener that is not bound (every listener is bound before
-`ready`, and a serve error afterwards ends `edge.Server.Run` and so the process,
-so a running process has none to report); a certificate renewed on disk and
-awaiting restart (it needs a file read, which the tracker's ticker must not do;
+Absent on purpose: a listener that failed to bind during startup (a bind
+error ends `edge.Server.Run` and so the process). One deliberate exception is
+the `shield_state_corrupt` fail-closed gate: a failed snapshot recovery keeps
+the process alive without binding anything, specifically so this condition and
+`/api/shield/state` stay queryable; a certificate renewed on disk and awaiting
+restart (it needs a file read, which the tracker's ticker must not do;
 `/api/tls` reports it); drain mode (its own gauge and endpoint). No placeholder entries stand in for them.
 
 Thresholds and notification stay in Prometheus Alertmanager. The WebUI header
@@ -3965,17 +3982,22 @@ case-insensitively — deliberately specific, with no bare "scanner" substring
 that could match a legitimate product. **Scanner heuristics are User-Agent
 only.**
 
-**Bans.** A scanner ban lasts `shield.ban` (default 1 h) and lives only in the
-shield's in-memory table, which is capped at **65536** entries (`banCap`,
-`banlist.go:15`) with an overflow counter. A re-ban extends an existing ban to
-the later of the two expiries and never shortens it (P2-SHD-008). Ban keys are
-unmapped IPs, and every lookup unmaps its argument, so `::ffff:192.0.2.1` is
-seen as `192.0.2.1` (P2-SHD-009). A ban also closes the banned source's
-tcp/tls/ws/wss connection: `guard` closes the one the banning request came on,
-and the read filter closes any other on its next read (`closeStream`,
-`edge.go:1123`, P2-SHD-006). An idle connection opened before the ban stays open
-until it next sends. There is no kernel enforcement and no API that lifts a
-ban.
+**Bans.** A scanner ban lasts `shield.ban` (default 1 h) and lives in the
+shield's in-memory table, which is capped at **65536** distinct keys
+(`banCap`, `banlist.go`) with an overflow counter. Each entry also carries
+the shield rule **generation** it was created under (§14.2): a re-ban
+extends only the entry of the same generation to the later of the two
+expiries and never shortens it (P2-SHD-008); a ban lookup is positive when
+any generation is live. Ban keys are unmapped IPs, and every lookup
+unmaps its argument, so `::ffff:192.0.2.1` is seen as `192.0.2.1`
+(P2-SHD-009). A ban also closes the banned source's tcp/tls/ws/wss
+connection: `guard` closes the one the banning request came on, and the
+read filter closes any other on its next read (`closeStream`, P2-SHD-006).
+An idle connection opened before the ban stays open until it next sends.
+There is no kernel enforcement. An explicit unban
+(`DELETE /api/shield/bans?kind=&source=&generation=`) removes exactly the
+named (key, generation); an unban aimed at the current generation never
+lifts a ban older rules made (§14.2).
 
 **Strike bans** (`Shield.Strike`, `offenders.go`). A plane may report a
 source's failures as strikes; over the reason's threshold the source IP is
@@ -4124,7 +4146,80 @@ after the unmarshal, and validation errors are redacted back to the `${ENV}`
 text, so neither `freesbc check` nor the admin `POST /api/config/validate` response can
 be used to read an environment variable.
 
-### 14.2 Deployment assumptions (not all enforced by the code)
+### 14.2 Rule generations and state snapshots
+
+**Rule generation.** Each piece of live shield state — a ban, a strike
+window, a rate bucket — carries the *generation* of the shield rules that
+created it (`shield.GenerationOf`, `generation.go`): a SHA-256 over the
+parsed, normalized tuple of `shield.ban`, `rate_limit`,
+`carrier_rate_limit`, `register_ban` and `admission_ban` (equivalent
+spellings such as `10/10m` and `10/600s` hash the same; `max_sessions` and
+`invite_rate_limit` are excluded, their state is not in the shield). A
+hot reload that changes any of these starts a new generation immediately:
+new requests create state under it, while state born under older
+generations keeps being enforced — and keeps completing under the rules it
+was born with (its captured deadline, window and threshold) — until it
+naturally expires. A ban lookup is positive under *any* live generation;
+a same-source ban under a new generation is an independent entry. The two
+rate scopes are physically separate limiters: a carrier bucket can never
+spend a public source's budget or vice versa, and the carrier exemption
+cannot leak across. `GET /api/shield/bans` and `/api/shield/offenders`
+carry each entry's `generation`, so an operator can tell rule
+generations apart.
+
+**Snapshot.** With `shield.state_file` (restart-only, absolute path; empty
+disables the feature and keeps today's memory-only behaviour) the shield
+writes one JSON envelope (`state.go`): an HMAC-SHA-256-signed, base64
+payload of the still-live bans of all three tables, the open strike
+windows (with their captured threshold, window and ban duration) and the
+rate buckets that have not refilled to full (a full bucket is the same as
+a fresh one). Times are absolute, so recovered state expires on its
+original deadlines. The 32-byte HMAC key is created 0600 at
+`<state_file>.key`; state and key are 0600, and every save is a
+same-directory temp file, fsync and atomic rename. The prune loop writes
+once a minute while state is dirty and `Shield.Close` writes a final
+best-effort copy.
+
+**Recovery ordering and fail-closed verification.** Recovery happens in
+`shield.New` (built by `edge.New`), i.e. before `edge.Run` binds any
+listener. The envelope is checked for format/version, HMAC, strict JSON
+and per-record bounds (parsable keys, known reasons, plausible times,
+parser-derived durations, table caps); expired records are dropped and
+counted. The outcomes are `disabled`, `empty` (no file yet),
+`same_generation`, `stale_generation` (the file predates a rule change:
+its entries restore under their own generations while new requests use
+the current one) and `fatal`. On `fatal` — a bad HMAC, malformed content,
+an unknown version or a state file whose key is missing — the file is
+renamed to `<state_file>.corrupt-<unixns>` for forensics, nothing is
+loaded, writes are disarmed, `edge.Run` opens **no** listener (neither the
+public sockets nor the trusted private socket) and blocks until shutdown,
+so a corrupted snapshot can never silently release attackers; the
+process stays up so the loopback admin plane can report the status. The
+three non-fatal operational failures are deliberately different: a
+snapshot write failure keeps the in-memory plane serving, records
+`last_save_error` and retries every minute; stale generations restore as
+older state; only content corruption closes the plane.
+
+Status is queryable at `GET /api/shield/state` (`phase`,
+`recovery_result`, `active_generation`, `snapshot_generation`, the
+restored counts, `expired_skipped`, the generations still live, save
+counters and timestamps, `fatal_error`) and in the health conditions
+`shield_state_corrupt` (critical), `shield_state_stale_generation`
+(degraded; clears once the old generations finish) and
+`shield_state_save_failed` (degraded; clears on the next good save).
+Deleting the state file is indistinguishable from a first start: an
+operator who deletes both files chooses to restart with an empty plane.
+The global INVITE limiter and the REGISTER-enumeration limiter (edge state,
+seconds-scale refill) are not snapshotted.
+
+**Explicit unban.** `DELETE /api/shield/bans?kind=ip|udp_ip|udp_socket
+&source=<IP|IP:port>&generation=<64 hex>` removes exactly the matching
+entry: kind/source/generation all required, 400 on a malformed selector,
+404 on a miss, and an unban aimed at one generation never removes another.
+It is audited (`shield_unban`) and goes through the same Host/Origin checks
+as the other mutating endpoints.
+
+### 14.3 Deployment assumptions (not all enforced by the code)
 
 - **The private socket is trusted.** The switch is exempt from the shield
   entirely on `private.ip:5060`, and its requests are not rate limited. The
@@ -4184,8 +4279,9 @@ be used to read an environment variable.
   that goes silent keeps its connection, a descriptor and a goroutine until its
   binding expires or the connection fails. The per-source cap (256) is shared
   by everything behind one NAT address.
-- There is **no operator unban**: a ban lapses only on expiry (`shield.ban`, or
-  1 min for a UDP socket ban) or with a restart.
+- An operator unban exists (`DELETE /api/shield/bans`, exact kind/source/generation,
+  §14.2); without it a ban lapses only on expiry (`shield.ban`, or 1 min for a
+  UDP socket ban) — with persistence disabled, also on a restart.
 - Strict-mode latch arming compares the **source IP only**; there is no SSRC
   or payload-type validation.
 
@@ -4436,6 +4532,6 @@ Stated because the code establishes them, not as future work.
 | `internal/sip` | reusable SIP primitives only: safe header accessors, transport-source parsing with `Unmap`, default ports, listener matching, branch/token generation, REGISTER expiry parsing (`DeltaSeconds`, `GrantedExpires`), `BuildCancel`/`TeardownRequest`, the read-filter wrapper | policy, workflow, or state: "a transcription of RFC 3261/3264 with no policy of its own" |
 | `internal/sip/sdp` | the bounded typed parse, codec intersection, and body construction from scratch | copying anything from another leg's body; deciding SDES policy (the package parses and builds `a=crypto`, the edge decides); DNS |
 | `internal/media` | port pools, latching, the payload-agnostic relay, the silence watchdog, the ICE-lite/DTLS-SRTP browser leg, the per-process DTLS identity, packet/byte counters | SIP, SDP, or any protocol above UDP. Its doc: "It knows nothing about SIP" |
-| `internal/shield` | the in-memory ban table, per-source token buckets, scanner signatures, the carrier-source predicate hook | kernel firewall state; being a hard dependency of anything |
+| `internal/shield` | the ban tables (three, generation-keyed), per-source token buckets (public/carrier separate), scanner signatures, the carrier-source predicate hook, an optional authenticated snapshot file | kernel firewall state; being a hard dependency of anything |
 | `internal/edge` | proxy dialogs keyed by Call-ID and both tags, the client binding table, the carrier directory (DNS) and carrier registration table, switch-node routing with cooldown, switch-request classification, topology hiding on carrier legs, admission, RFC 3261 §16 forwarding mechanics, media anchoring and SDP construction | carrier accounts, routing or credentials; any B2BUA call state |
 | `internal/admin` | HTTP routing, Basic auth, cookie sessions (login, logout) and their shared limiter, the Prometheus registry and collector, the redacted config view, the raw config round-trip, the embedded WebUI | reading edge state directly — everything arrives through `admin.Deps` closures built in `internal/app` |

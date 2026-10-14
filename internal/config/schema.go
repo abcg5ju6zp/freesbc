@@ -217,6 +217,13 @@ type ShieldConfig struct {
 	// is neither a carrier nor registered) past a threshold ("<n>/<window>",
 	// e.g. "50/5m"), or "off". Default "50/5m". Hot.
 	AdmissionBan string `yaml:"admission_ban"`
+	// StateFile, when set, is the absolute path of the file the shield's
+	// live security state (bans, strike windows, rate buckets) is snapshotted
+	// to and restored from on start, so a restart keeps the bans that are
+	// still in force, each bound to the shield rule generation that made it.
+	// Empty keeps the state in memory only (the default). A sidecar HMAC key
+	// is kept at "<state_file>.key". Restart-only.
+	StateFile string `yaml:"state_file"`
 }
 
 type AdminConfig struct {

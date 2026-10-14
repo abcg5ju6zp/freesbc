@@ -149,7 +149,7 @@ func TestCheckFromUDPScannerBansSocketOnly(t *testing.T) {
 	s := testShield(t, shieldCfg)
 	clock := time.Unix(1_700_000_000, 0)
 	s.socketBans.now = func() time.Time { return clock }
-	s.limiter.now = func() time.Time { return clock }
+	s.limPublic.now = func() time.Time { return clock }
 	scan := netip.MustParseAddrPort("198.51.100.60:5060")
 	other := netip.MustParseAddrPort("198.51.100.60:5062")
 	if s.CheckFrom(scan, "friendly-scanner", "udp") != Drop {

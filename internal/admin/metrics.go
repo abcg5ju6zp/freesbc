@@ -62,6 +62,11 @@ type collector struct {
 
 	restartRequired *prometheus.Desc
 	reloadFailed    *prometheus.Desc
+
+	stateEnabled  *prometheus.Desc
+	stateResult   *prometheus.Desc
+	stateSaves    *prometheus.Desc
+	stateRestored *prometheus.Desc
 }
 
 func newCollector(deps Deps, audit *auditLog, health *healthTracker, tlsRec func() *tlsRecord) *collector {
@@ -81,6 +86,11 @@ func newCollector(deps Deps, audit *auditLog, health *healthTracker, tlsRec func
 
 		restartRequired: prometheus.NewDesc("freesbc_config_restart_required", "Restart-only config keys changed on disk and not applied until restart.", nil, nil),
 		reloadFailed:    prometheus.NewDesc("freesbc_config_reload_failed", "1 while the last config reload failed and the previous config is still active, else 0.", nil, nil),
+
+		stateEnabled:  prometheus.NewDesc("freesbc_shield_state_enabled", "1 while shield state persistence (shield.state_file) is enabled, else 0.", nil, nil),
+		stateResult:   prometheus.NewDesc("freesbc_shield_state_recovery_result", "1 for the current recovery result (disabled, empty, same_generation, stale_generation, fatal).", []string{"result"}, nil),
+		stateSaves:    prometheus.NewDesc("freesbc_shield_state_saves_total", "Shield state snapshot saves, by result (ok, failed).", []string{"result"}, nil),
+		stateRestored: prometheus.NewDesc("freesbc_shield_state_restored_entries", "Live entries loaded by the last recovery, by kind (ip_ban, udp_ip_ban, udp_socket_ban, offender, bucket).", []string{"kind"}, nil),
 
 		proxyRegs:       prometheus.NewDesc("freesbc_active_registrations", "Registration bindings the edge proxy currently holds.", nil, nil),
 		proxySubs:       prometheus.NewDesc("freesbc_edge_subscriptions", "SUBSCRIBE dialogs the edge routes NOTIFYs for, pending or active.", nil, nil),
@@ -131,6 +141,10 @@ func (c *collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.tlsExpiry
 	ch <- c.restartRequired
 	ch <- c.reloadFailed
+	ch <- c.stateEnabled
+	ch <- c.stateResult
+	ch <- c.stateSaves
+	ch <- c.stateRestored
 	ch <- c.healthSt
 	for _, d := range []*prometheus.Desc{
 		c.proxyRegs, c.proxySubs, c.proxyDialogs, c.proxySessions, c.proxyDraining, c.proxyMedia, c.proxyWebRTC,
@@ -174,6 +188,29 @@ func (c *collector) Collect(ch chan<- prometheus.Metric) {
 		}
 		g(c.restartRequired, float64(len(rs.RestartRequired)))
 		g(c.reloadFailed, failed)
+	}
+
+	if c.deps.ShieldState != nil {
+		st := c.deps.ShieldState()
+		enabled := 0.0
+		if st.Enabled {
+			enabled = 1
+		}
+		g(c.stateEnabled, enabled)
+		for _, r := range []string{"disabled", "empty", "same_generation", "stale_generation", "fatal"} {
+			v := 0.0
+			if st.RecoveryResult == r {
+				v = 1
+			}
+			g(c.stateResult, v, r)
+		}
+		g(c.stateSaves, float64(st.SavesOK), "ok")
+		g(c.stateSaves, float64(st.SavesFailed), "failed")
+		g(c.stateRestored, float64(st.Restored.IPBans), "ip_ban")
+		g(c.stateRestored, float64(st.Restored.UDPIPBans), "udp_ip_ban")
+		g(c.stateRestored, float64(st.Restored.UDPSocketBans), "udp_socket_ban")
+		g(c.stateRestored, float64(st.Restored.Offenders), "offender")
+		g(c.stateRestored, float64(st.Restored.Buckets), "bucket")
 	}
 
 	if c.deps.Proxy == nil {

@@ -34,18 +34,22 @@ type CarrierRegistration struct {
 type Ban struct {
 	Source string // IP, or IP:port for a UDP socket ban
 	Kind   string // "ip", "udp_ip" or "udp_socket"
-	Reason string // "scanner" or "register"
-	Since  time.Time
-	Until  time.Time
+	Reason string // "scanner", "register" or "admission"
+	// Generation is the shield rule generation the ban was created under.
+	Generation string
+	Since      time.Time
+	Until      time.Time
 }
 
 // Offender is one source with shield strikes in an open window.
 type Offender struct {
-	Source  string // IPv4 address, or IPv6 /64 prefix
-	Reason  string // "register"
-	Strikes int
-	Since   time.Time // the window opened
-	Until   time.Time // the window closes
+	Source string // IPv4 address, or IPv6 /64 prefix
+	Reason string // "register", "admission" or "admission_udp"
+	// Generation is the shield rule generation the window opened under.
+	Generation string
+	Strikes    int
+	Since      time.Time // the window opened
+	Until      time.Time // the window closes
 }
 
 // SwitchNode is the passive health of one switch node.
@@ -187,13 +191,34 @@ func (s *Server) handleCarrierRegistrations(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, out)
 }
 
-// handleBans serves GET /api/shield/bans?limit=&offset=: one page of the
+// handleBans serves /api/shield/bans: GET lists one page of the live bans;
+// DELETE removes exactly the ban named by kind, source and its rule
+// generation. Auth, the Host check and (for DELETE) the Origin check run
+// before it.
+func (s *Server) handleBans(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if s.deps.Bans == nil {
+			http.NotFound(w, r)
+			return
+		}
+		s.listBans(w, r)
+	case http.MethodDelete:
+		if s.deps.Unban == nil {
+			http.NotFound(w, r)
+			return
+		}
+		s.handleUnban(w, r)
+	default:
+		w.Header().Set("Allow", "GET, DELETE")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// listBans serves GET /api/shield/bans?limit=&offset=: one page of the
 // live bans, the total, and the cumulative ban additions refused at the ban
 // table's cap.
-func (s *Server) handleBans(w http.ResponseWriter, r *http.Request) {
-	if !stateGET(w, r, s.deps.Bans != nil) {
-		return
-	}
+func (s *Server) listBans(w http.ResponseWriter, r *http.Request) {
 	limit, offset, ok := pageParams(w, r)
 	if !ok {
 		return
@@ -203,17 +228,54 @@ func (s *Server) handleBans(w http.ResponseWriter, r *http.Request) {
 	items := make([]map[string]any, 0, len(bans))
 	for _, b := range bans {
 		items = append(items, map[string]any{
-			"source":    b.Source,
-			"kind":      b.Kind,
-			"reason":    b.Reason,
-			"since":     rfc3339(b.Since),
-			"remaining": secondsUntil(b.Until, now),
+			"source":     b.Source,
+			"kind":       b.Kind,
+			"reason":     b.Reason,
+			"generation": b.Generation,
+			"since":      rfc3339(b.Since),
+			"remaining":  secondsUntil(b.Until, now),
 		})
 	}
 	writeJSON(w, map[string]any{
 		"items": items, "total": total, "limit": limit, "offset": offset,
 		"ban_adds_rejected": rejected,
 	})
+}
+
+// handleUnban serves DELETE /api/shield/bans?kind=&source=&generation=: an
+// explicit unban acts only on the ban matching all three, so a ban made
+// under older rules is never released by an unban aimed at the current
+// generation. A clean miss is 404; malformed selectors are 400.
+func (s *Server) handleUnban(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	kind, source, generation := q.Get("kind"), q.Get("source"), q.Get("generation")
+	switch kind {
+	case "ip", "udp_ip", "udp_socket":
+	default:
+		http.Error(w, "kind must be ip, udp_ip or udp_socket", http.StatusBadRequest)
+		return
+	}
+	if source == "" || len(source) > 128 {
+		http.Error(w, "source is required (IP, or IP:port for udp_socket)", http.StatusBadRequest)
+		return
+	}
+	if len(generation) != 64 {
+		http.Error(w, "generation (64 hex chars) is required: an unban must name the rules the ban was created under", http.StatusBadRequest)
+		return
+	}
+	removed, err := s.deps.Unban(kind, source, generation)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !removed {
+		http.Error(w, "no live ban matches this kind, source and generation", http.StatusNotFound)
+		return
+	}
+	s.audit.record(AuditShieldUnban, remoteIP(r), AuditResultOK)
+	s.log.Info("admin: shield ban removed",
+		"remote", r.RemoteAddr, "kind", kind, "source", source, "generation", generation)
+	writeJSON(w, map[string]any{"unbanned": true, "kind": kind, "source": source, "generation": generation})
 }
 
 // handleOffenders serves GET /api/shield/offenders?limit=: the sources with
@@ -232,14 +294,64 @@ func (s *Server) handleOffenders(w http.ResponseWriter, r *http.Request) {
 	items := make([]map[string]any, 0, len(top))
 	for _, o := range top {
 		items = append(items, map[string]any{
-			"source":    o.Source,
-			"reason":    o.Reason,
-			"strikes":   o.Strikes,
-			"since":     rfc3339(o.Since),
-			"remaining": secondsUntil(o.Until, now),
+			"source":     o.Source,
+			"reason":     o.Reason,
+			"generation": o.Generation,
+			"strikes":    o.Strikes,
+			"since":      rfc3339(o.Since),
+			"remaining":  secondsUntil(o.Until, now),
 		})
 	}
 	writeJSON(w, map[string]any{"items": items, "total": total, "limit": limit})
+}
+
+// handleShieldState serves GET /api/shield/state: the snapshot persistence
+// and recovery status (see shield.Status).
+func (s *Server) handleShieldState(w http.ResponseWriter, r *http.Request) {
+	if !stateGET(w, r, s.deps.ShieldState != nil) {
+		return
+	}
+	st := s.deps.ShieldState()
+	writeJSON(w, map[string]any{
+		"enabled":             st.Enabled,
+		"path":                st.Path,
+		"phase":               st.Phase,
+		"recovery_result":     st.RecoveryResult,
+		"active_generation":   st.ActiveGeneration,
+		"snapshot_generation": rfc3339ish(st.SnapshotGeneration),
+		"restored_at":         rfc3339(st.RestoredAt),
+		"restored": map[string]any{
+			"ip_bans":         st.Restored.IPBans,
+			"udp_ip_bans":     st.Restored.UDPIPBans,
+			"udp_socket_bans": st.Restored.UDPSocketBans,
+			"offenders":       st.Restored.Offenders,
+			"buckets":         st.Restored.Buckets,
+		},
+		"expired_skipped":    st.ExpiredSkipped,
+		"stale_generations":  st.StaleGenerations,
+		"last_save_at":       rfc3339(st.LastSaveAt),
+		"last_save_error":    nonEmpty(st.LastSaveError),
+		"last_save_error_at": rfc3339(st.LastSaveErrorAt),
+		"saves_ok":           st.SavesOK,
+		"saves_failed":       st.SavesFailed,
+		"fatal_error":        nonEmpty(st.FatalError),
+	})
+}
+
+// rfc3339ish renders a non-empty string as-is (the generation hashes are
+// already safe), JSON null otherwise.
+func rfc3339ish(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func nonEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 // handleSwitchNodes serves GET /api/switch-nodes: always an array.

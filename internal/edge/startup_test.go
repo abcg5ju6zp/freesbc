@@ -122,6 +122,7 @@ func TestWithPrivateAddrOverridesFixedSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = plain.shield.Close() })
 	if plain.privAddr != netip.MustParseAddrPort(harnessPrivatePlaceholder+":5060") {
 		t.Errorf("default private socket = %v", plain.privAddr)
 	}

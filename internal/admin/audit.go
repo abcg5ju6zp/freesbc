@@ -33,6 +33,9 @@ const (
 	// out of drain mode. A repeated DELETE that changes nothing is not an
 	// event.
 	AuditDrainOff AuditType = "drain_off"
+	// AuditShieldUnban is an authenticated DELETE /api/shield/bans that
+	// removed a live ban. A request that matched no ban is not an event.
+	AuditShieldUnban AuditType = "shield_unban"
 )
 
 // AuditResult is the outcome recorded with an event; a fixed set, also the

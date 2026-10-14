@@ -16,7 +16,7 @@ func TestBanListBanAndExpiry(t *testing.T) {
 	if bl.banned(ip) {
 		t.Fatal("fresh ip not banned")
 	}
-	bl.ban(ip, time.Hour, "test")
+	bl.ban(ip, time.Hour, "test", testGen)
 	if !bl.banned(ip) {
 		t.Fatal("banned within the window")
 	}
@@ -35,7 +35,7 @@ func TestBanListPruneDropsExpired(t *testing.T) {
 	now := time.Unix(1000, 0)
 	bl.now = func() time.Time { return now }
 	ip := netip.MustParseAddr("198.51.100.9")
-	bl.ban(ip, time.Minute, "test")
+	bl.ban(ip, time.Minute, "test", testGen)
 	now = now.Add(2 * time.Minute)
 	bl.prune()
 	if len(bl.until) != 0 {
@@ -59,7 +59,7 @@ func TestBanListCap(t *testing.T) {
 	bl.now = func() time.Time { return now }
 
 	for i := 0; i < banCap; i++ {
-		if !bl.ban(capIP(i), time.Hour, "test") {
+		if !bl.ban(capIP(i), time.Hour, "test", testGen) {
 			t.Fatalf("ban %d below the cap was refused", i)
 		}
 	}
@@ -68,7 +68,7 @@ func TestBanListCap(t *testing.T) {
 	}
 
 	// One more unique source: refused, counted, and the table does not grow.
-	if bl.ban(capIP(banCap), time.Hour, "test") {
+	if bl.ban(capIP(banCap), time.Hour, "test", testGen) {
 		t.Fatal("ban at the hard cap must be refused")
 	}
 	if got := bl.overflowed(); got == 0 {
@@ -80,14 +80,14 @@ func TestBanListCap(t *testing.T) {
 
 	// Re-banning an already-tracked source is an extension, not a new entry:
 	// it must still succeed at the cap.
-	if !bl.ban(capIP(0), time.Hour, "test") {
+	if !bl.ban(capIP(0), time.Hour, "test", testGen) {
 		t.Fatal("extending an existing ban at the cap must not be refused")
 	}
 
 	// Once every entry expires, the lazy sweep frees room: the previously
 	// refused source is now accepted, and the table holds only it.
 	now = now.Add(2 * time.Hour)
-	if !bl.ban(capIP(banCap), time.Hour, "test") {
+	if !bl.ban(capIP(banCap), time.Hour, "test", testGen) {
 		t.Fatal("ban after expiry sweep must succeed")
 	}
 	if len(bl.until) != 1 {
@@ -133,10 +133,10 @@ func TestShieldBansPaginationAndExpiry(t *testing.T) {
 	s.bans.now = func() time.Time { return now }
 	for i := 0; i < 25; i++ {
 		now = time.Unix(9000, 0).Add(time.Duration(i) * time.Second)
-		s.bans.ban(capIP(i), time.Hour, BanReasonScanner)
+		s.bans.ban(capIP(i), time.Hour, BanReasonScanner, testGen)
 	}
 	now = time.Unix(9000, 0).Add(30 * time.Second)
-	s.bans.ban(capIP(100), time.Second, BanReasonScanner) // expires below
+	s.bans.ban(capIP(100), time.Second, BanReasonScanner, testGen) // expires below
 
 	now = now.Add(5 * time.Second)
 	page, total := s.Bans(10, 0)
@@ -174,9 +174,9 @@ func TestShieldBansExtensionKeepsStart(t *testing.T) {
 	now := time.Unix(100, 0)
 	bl.now = func() time.Time { return now }
 	ip := netip.MustParseAddr("198.51.100.40")
-	bl.ban(ip, time.Minute, BanReasonScanner)
+	bl.ban(ip, time.Minute, BanReasonScanner, testGen)
 	now = now.Add(10 * time.Second)
-	bl.ban(ip, time.Hour, "other")
+	bl.ban(ip, time.Hour, "other", testGen)
 	got := bl.live()
 	if len(got) != 1 || !got[0].since.Equal(time.Unix(100, 0)) || got[0].reason != BanReasonScanner {
 		t.Fatalf("extended ban = %+v", got)
@@ -197,8 +197,8 @@ func TestShieldBansRaceWithAdds(t *testing.T) {
 					return
 				default:
 				}
-				s.bans.ban(capIP(w*100000+i%5000), time.Hour, BanReasonScanner)
-				s.socketBans.ban(netip.AddrPortFrom(capIP(i%5000), uint16(1000+w)), time.Minute, BanReasonScanner)
+				s.bans.ban(capIP(w*100000+i%5000), time.Hour, BanReasonScanner, testGen)
+				s.socketBans.ban(netip.AddrPortFrom(capIP(i%5000), uint16(1000+w)), time.Minute, BanReasonScanner, testGen)
 			}
 		}(w)
 	}

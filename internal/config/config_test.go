@@ -474,6 +474,26 @@ func TestShieldRegisterBan(t *testing.T) {
 	}
 }
 
+// shield.state_file is off by default; an absolute path is accepted, a
+// relative path or a bare directory is rejected.
+func TestShieldStateFile(t *testing.T) {
+	if c := mustParse(t, with("")); c.Shield.StateFile != "" {
+		t.Errorf("state_file default = %q, want empty", c.Shield.StateFile)
+	}
+	if c := mustParse(t, with("shield: { state_file: /var/lib/freesbc/shield.state }\n")); c.Shield.StateFile != "/var/lib/freesbc/shield.state" {
+		t.Errorf("state_file = %q", c.Shield.StateFile)
+	}
+	for _, bad := range []string{
+		"shield: { state_file: relative/path.state }\n",
+		"shield: { state_file: ./shield.state }\n",
+		"shield: { state_file: / }\n",
+	} {
+		if err := parseErr(t, with(bad)); !strings.Contains(err, "shield.state_file") {
+			t.Errorf("expected a shield.state_file error for %q, got %v", bad, err)
+		}
+	}
+}
+
 func TestPortRangePairs(t *testing.T) {
 	for _, tc := range []struct {
 		r    PortRange

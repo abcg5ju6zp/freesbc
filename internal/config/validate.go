@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -359,6 +360,12 @@ func (c *Config) validateShield(fail failFunc) {
 	}
 	if _, err := ParseStrikeLimit(c.Shield.AdmissionBan); err != nil {
 		fail("shield.admission_ban: %v", c.envRedact.detail(c.Shield.AdmissionBan, err))
+	}
+	if c.Shield.StateFile != "" {
+		clean := filepath.Clean(c.Shield.StateFile)
+		if !filepath.IsAbs(clean) || clean == "/" || filepath.Base(clean) == "." || filepath.Base(clean) == ".." {
+			fail("shield.state_file: must be an absolute file path, got %q", c.Shield.StateFile)
+		}
 	}
 }
 

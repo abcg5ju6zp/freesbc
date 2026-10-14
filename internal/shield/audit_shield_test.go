@@ -73,9 +73,9 @@ func TestAuditRateLimiterBucketMapBounded(t *testing.T) {
 		a[12], a[13], a[14], a[15] = byte(i>>24), byte(i>>16), byte(i>>8), byte(i)
 		s.Check(netip.AddrFrom16(a), "Yealink", "udp")
 	}
-	s.limiter.mu.Lock()
-	got := len(s.limiter.buckets)
-	s.limiter.mu.Unlock()
+	s.limPublic.mu.Lock()
+	got := len(s.limPublic.buckets)
+	s.limPublic.mu.Unlock()
 	if got > banCap {
 		t.Errorf("rate-limit bucket map holds %d entries after %d distinct sources (bound %d)", got, n, banCap)
 	}
@@ -91,18 +91,18 @@ func TestAuditPruneDoesNotResetHourlyBucket(t *testing.T) {
 	r.now = func() time.Time { return clock }
 	src := netip.MustParseAddr("198.51.100.30")
 	for i := 0; i < 10; i++ {
-		if !r.allow(src, 10, time.Hour, true) {
+		if !r.allow(src, 10, time.Hour, true, testGen) {
 			t.Fatalf("token %d refused", i)
 		}
 	}
-	if r.allow(src, 10, time.Hour, true) {
+	if r.allow(src, 10, time.Hour, true, testGen) {
 		t.Fatal("11th request allowed before the prune")
 	}
 	clock = clock.Add(61 * time.Second)
 	r.prune()
 	allowed := 0
 	for i := 0; i < 10; i++ {
-		if r.allow(src, 10, time.Hour, true) {
+		if r.allow(src, 10, time.Hour, true, testGen) {
 			allowed++
 		}
 	}
@@ -119,8 +119,8 @@ func TestAuditReBanDoesNotShorten(t *testing.T) {
 	clock := time.Unix(1_700_000_000, 0)
 	b.now = func() time.Time { return clock }
 	ip := netip.MustParseAddr("198.51.100.40")
-	b.ban(ip, time.Hour, "test")
-	b.ban(ip, time.Minute, "test")
+	b.ban(ip, time.Hour, "test", testGen)
+	b.ban(ip, time.Minute, "test", testGen)
 	clock = clock.Add(2 * time.Minute)
 	if !b.banned(ip) {
 		t.Errorf("a 1 h ban was cut to 1 min by a later shorter ban")

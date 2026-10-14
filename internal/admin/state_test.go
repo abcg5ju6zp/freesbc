@@ -23,10 +23,27 @@ func stateDeps() Deps {
 	}
 	d.Bans = func(limit, offset int) ([]Ban, int, int64) {
 		return []Ban{{Source: "203.0.113.50", Kind: "ip", Reason: "scanner",
-			Since: now.Add(-time.Minute), Until: now.Add(90 * time.Second)}}, 3, 5
+			Generation: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			Since:      now.Add(-time.Minute), Until: now.Add(90 * time.Second)}}, 3, 5
+	}
+	d.Unban = func(kind, source, generation string) (bool, error) { return true, nil }
+	d.ShieldState = func() ShieldState {
+		return ShieldState{
+			Enabled: true, Path: "/var/lib/freesbc/shield.state", Phase: "restored",
+			RecoveryResult:   "same_generation",
+			ActiveGeneration: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			RestoredAt:       now.Add(-2 * time.Second),
+			Restored: ShieldStateRestored{IPBans: 1, UDPIPBans: 2, UDPSocketBans: 3,
+				Offenders: 4, Buckets: 5},
+			ExpiredSkipped:   6,
+			StaleGenerations: []string{},
+			LastSaveAt:       now.Add(-time.Second),
+			SavesOK:          2,
+		}
 	}
 	d.Offenders = func(limit int) ([]Offender, int) {
-		return []Offender{{Source: "198.51.100.77", Reason: "register", Strikes: 9,
+		return []Offender{{Source: "198.51.100.77", Reason: "register",
+			Generation: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210", Strikes: 9,
 			Since: now.Add(-time.Minute), Until: now.Add(9 * time.Minute)}}, 4
 	}
 	d.SwitchNodes = func() []SwitchNode {
@@ -57,7 +74,7 @@ func stateEmptyDeps() Deps {
 
 var statePaths = []string{
 	"/api/registrations", "/api/carrier-registrations", "/api/shield/bans",
-	"/api/shield/offenders", "/api/switch-nodes", "/api/carriers",
+	"/api/shield/offenders", "/api/shield/state", "/api/switch-nodes", "/api/carriers",
 }
 
 func TestStateEndpointsRequireAuth(t *testing.T) {
@@ -121,7 +138,8 @@ func TestStateEndpointsData(t *testing.T) {
 
 	bans := get("/api/shield/bans").(map[string]any)
 	b := page(bans)
-	if b["source"] != "203.0.113.50" || b["kind"] != "ip" || b["reason"] != "scanner" || b["remaining"].(float64) < 88 || b["since"] == nil {
+	if b["source"] != "203.0.113.50" || b["kind"] != "ip" || b["reason"] != "scanner" || b["remaining"].(float64) < 88 || b["since"] == nil ||
+		b["generation"] != "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" {
 		t.Errorf("ban = %v", b)
 	}
 	if bans["total"] != float64(3) || bans["ban_adds_rejected"] != float64(5) {
@@ -131,8 +149,24 @@ func TestStateEndpointsData(t *testing.T) {
 	offs := get("/api/shield/offenders").(map[string]any)
 	o := page(offs)
 	if o["source"] != "198.51.100.77" || o["reason"] != "register" || o["strikes"] != float64(9) ||
-		o["remaining"].(float64) < 538 || o["since"] == nil || offs["total"] != float64(4) {
+		o["remaining"].(float64) < 538 || o["since"] == nil || offs["total"] != float64(4) ||
+		o["generation"] != "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210" {
 		t.Errorf("offenders = %v", offs)
+	}
+
+	st := get("/api/shield/state").(map[string]any)
+	if st["enabled"] != true || st["phase"] != "restored" || st["recovery_result"] != "same_generation" ||
+		st["active_generation"] != "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" ||
+		st["saves_ok"] != float64(2) || st["expired_skipped"] != float64(6) || st["fatal_error"] != nil {
+		t.Errorf("shield state = %v", st)
+	}
+	restored := st["restored"].(map[string]any)
+	if restored["ip_bans"] != float64(1) || restored["udp_ip_bans"] != float64(2) ||
+		restored["udp_socket_bans"] != float64(3) || restored["offenders"] != float64(4) || restored["buckets"] != float64(5) {
+		t.Errorf("restored counts = %v", restored)
+	}
+	if gg := st["stale_generations"].([]any); len(gg) != 0 {
+		t.Errorf("stale generations = %v, want []", gg)
 	}
 
 	nodes := get("/api/switch-nodes").([]any)
@@ -243,8 +277,12 @@ func TestStateMethodAndNilClosure(t *testing.T) {
 		req := newReq("POST", p, nil)
 		req.SetBasicAuth("admin", "secret")
 		withData.ServeHTTP(rr, req)
-		if rr.Code != http.StatusMethodNotAllowed || rr.Header().Get("Allow") != "GET" {
-			t.Errorf("POST %s = %d Allow=%q, want 405 GET", p, rr.Code, rr.Header().Get("Allow"))
+		wantAllow := "GET"
+		if p == "/api/shield/bans" {
+			wantAllow = "GET, DELETE"
+		}
+		if rr.Code != http.StatusMethodNotAllowed || rr.Header().Get("Allow") != wantAllow {
+			t.Errorf("POST %s = %d Allow=%q, want 405 %q", p, rr.Code, rr.Header().Get("Allow"), wantAllow)
 		}
 		rr = httptest.NewRecorder()
 		req = newReq("GET", p, nil)

@@ -44,6 +44,35 @@ type ShieldStats struct {
 	DropsByReason map[string]int64
 }
 
+// ShieldStateRestored is the record counts of one recovery.
+type ShieldStateRestored struct {
+	IPBans        int `json:"ip_bans"`
+	UDPIPBans     int `json:"udp_ip_bans"`
+	UDPSocketBans int `json:"udp_socket_bans"`
+	Offenders     int `json:"offenders"`
+	Buckets       int `json:"buckets"`
+}
+
+// ShieldState mirrors the shield's snapshot persistence status.
+type ShieldState struct {
+	Enabled            bool
+	Path               string
+	Phase              string
+	RecoveryResult     string
+	ActiveGeneration   string
+	SnapshotGeneration string
+	RestoredAt         time.Time
+	Restored           ShieldStateRestored
+	ExpiredSkipped     int
+	StaleGenerations   []string
+	LastSaveAt         time.Time
+	LastSaveError      string
+	LastSaveErrorAt    time.Time
+	SavesOK            int64
+	SavesFailed        int64
+	FatalError         string
+}
+
 // Deps are the live-data closures the admin surface reads. All must be safe
 // for concurrent use (they read already-synchronized structures).
 type Deps struct {
@@ -90,6 +119,13 @@ type Deps struct {
 	// Bans returns one page of the live shield bans, the total, and the
 	// cumulative ban additions refused at the table cap.
 	Bans func(limit, offset int) (page []Ban, total int, addsRejected int64)
+	// Unban removes exactly one ban matching kind, source and the rule
+	// generation it was created under. nil makes DELETE /api/shield/bans
+	// answer 404.
+	Unban func(kind, source, generation string) (bool, error)
+	// ShieldState reports snapshot persistence and recovery status. nil
+	// makes GET /api/shield/state answer 404.
+	ShieldState func() ShieldState
 	// Offenders returns up to limit sources with shield strikes in an open
 	// window, most strikes first, and the total number of such sources.
 	Offenders func(limit int) (top []Offender, total int)
@@ -244,6 +280,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/carrier-registrations", s.requireAuth(s.handleCarrierRegistrations))
 	mux.HandleFunc("/api/shield/bans", s.requireAuth(s.handleBans))
 	mux.HandleFunc("/api/shield/offenders", s.requireAuth(s.handleOffenders))
+	mux.HandleFunc("/api/shield/state", s.requireAuth(s.handleShieldState))
 	mux.HandleFunc("/api/switch-nodes", s.requireAuth(s.handleSwitchNodes))
 	mux.HandleFunc("/api/carriers", s.requireAuth(s.handleCarriers))
 	mux.HandleFunc("/api/drain", s.requireAuth(s.handleDrain))
